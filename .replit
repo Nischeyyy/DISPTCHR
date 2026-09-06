@@ -69,8 +69,8 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd frontend && EXPO_PUBLIC_BACKEND_URL=https://$REPLIT_DEV_DOMAIN ./node_modules/.bin/expo start --tunnel --port 8099"
-waitForPort = 8099
+args = "cd frontend && EXPO_FORCE_WEBCONTAINER_ENV=true EXPO_PUBLIC_BACKEND_URL=https://$REPLIT_DEV_DOMAIN ./node_modules/.bin/expo start --tunnel --port 8081"
+waitForPort = 8081
 
 [[workflows.workflow]]
 name = "Manager Portal"

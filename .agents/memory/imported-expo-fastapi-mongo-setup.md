@@ -22,3 +22,7 @@ description: Setup and debugging notes for a React Native/Expo web frontend + Fa
 
 ## Debugging technique: browser console log capture is scoped to the embedded Replit preview
 The automatic browser-console log capture (surfaced via the logs-refresh tool) only sees console output from the Replit-embedded preview iframe, not from a separate browser tab/window the user opens manually (e.g. testing in incognito). If a user reports testing in "a new tab" and no corresponding console output shows up, that's expected — ask them to reproduce inside the embedded preview if you need to observe it yourself.
+
+## Expo Go tunnel on Replit
+- Expo's normal `--tunnel`/ngrok path can fail with `ERR_NGROK_316` because the bundled Expo credential cannot claim the generated `ngrok.app` hostname, even after installing `@expo/ngrok`.
+- Expo CLI's WebSocket tunnel works when forced with `EXPO_FORCE_WEBCONTAINER_ENV=true`, but it only supports Metro port 8081. The Replit Expo Go workflow should use `--tunnel --port 8081` with that flag and set `EXPO_PUBLIC_BACKEND_URL` to the public Replit dev domain so native requests do not use relative URLs.
