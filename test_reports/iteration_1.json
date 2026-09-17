@@ -36,6 +36,6 @@
   "seed_data_creation": "None created manually; backend auto-seeds users, sites, shifts, open_shifts, announcements, payroll, wallet_documents, equipment on empty DB. Tests use only seeded data + TEST_-prefixed transient users/incidents.",
   "retest_needed": false,
   "should_main_agent_self_test": true,
-  "context_for_next_testing_agent": "Backend is stable. Reuse /app/backend/tests/backend_test.py for regression. BASE_URL is hardcoded to https://ops-clock-in.preview.emergentagent.com. Guard credentials: guard@skyhawk.com / Password123. When testing frontend, note EXPO_PUBLIC_BACKEND_URL is used (not EXPO_BACKEND_URL) in frontend/.env.",
+  "context_for_next_testing_agent": "Backend is stable. Reuse /app/backend/tests/backend_test.py for regression. BASE_URL is hardcoded to https://dispatch-core-34.preview.emergentagent.com. Guard credentials: guard@skyhawk.com / Password123. When testing frontend, note EXPO_PUBLIC_BACKEND_URL is used (not EXPO_BACKEND_URL) in frontend/.env.",
   "rca_of_issue": "N/A — no bugs found."
 }

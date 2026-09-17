@@ -4,7 +4,7 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = "https://ops-clock-in.preview.emergentagent.com"
+BASE_URL = "https://dispatch-core-34.preview.emergentagent.com"
 GUARD_EMAIL = "guard@skyhawk.com"
 GUARD_PASSWORD = "Password123"
 ADMIN_EMAIL = "admin@skyhawk.com"

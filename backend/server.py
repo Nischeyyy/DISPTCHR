@@ -3041,7 +3041,10 @@ app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
+    # Bearer-token auth only (no cookies), so credentials aren't needed. Keeping this
+    # False makes Starlette return "Access-Control-Allow-Origin: *" instead of echoing
+    # the Origin header, which the preview proxy rewrites and would otherwise break CORS.
+    allow_credentials=False,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],

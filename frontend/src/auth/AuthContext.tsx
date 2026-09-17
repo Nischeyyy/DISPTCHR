@@ -40,14 +40,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refresh = useCallback(async () => {
     try {
+      console.log('[AUTH] refresh start');
       const token = await getToken();
+      console.log('[AUTH] token?', !!token);
       if (!token) {
         setUser(null);
         return;
       }
       const u = await api<User>('/auth/me', { skipUnauthorizedHandler: true });
+      console.log('[AUTH] me ok', u?.email);
       setUser(u);
-    } catch {
+    } catch (e) {
+      console.log('[AUTH] refresh error', String(e));
       await setToken(null);
       setUser(null);
     }
@@ -71,7 +75,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     (async () => {
+      console.log('[AUTH] mount effect - calling refresh');
       await refresh();
+      console.log('[AUTH] mount effect - setLoading false');
       setLoading(false);
     })();
   }, [refresh]);

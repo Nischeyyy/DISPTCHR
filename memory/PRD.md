@@ -47,3 +47,10 @@ Availability preferences, Company Resources (SOPs/videos), Equipment return/dama
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`.
+
+## Environment Restore (June 2026 fork)
+- Backend `.env` created (MONGO_URL, DB_NAME, JWT_*). Frontend `.env` created (EXPO_PUBLIC_BACKEND_URL).
+- `yarn.lock` Replit registry URLs replaced with registry.npmjs.org.
+- Verified end-to-end: login as admin@skyhawk.com / Admin123 → Manager Dashboard renders with live data.
+- Optional secrets NOT configured (features degrade gracefully): SENDGRID_API_KEY, SENDGRID_FROM_EMAIL (email), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER (SMS), EMERGENT_PUSH_KEY (push, set at deploy).
+- Fixed login failure from user's browser: preview proxy rewrites `Origin`, and `allow_credentials=True` made Starlette echo the rewritten origin → browser blocked POST after preflight. Set `allow_credentials=False` (Bearer auth, no cookies) so ACAO is `*`.
