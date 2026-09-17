@@ -42,7 +42,8 @@ def _require_env(key: str) -> str:
     if not v:
         raise RuntimeError(
             f"Required environment variable '{key}' is not set. "
-            "Add it to Replit Secrets and restart."
+            "Set it in your deployment environment (Openship -> api service -> Environment, "
+            "or backend/.env locally) and restart."
         )
     return v
 

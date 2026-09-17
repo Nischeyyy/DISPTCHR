@@ -54,3 +54,12 @@ See `/app/memory/test_credentials.md`.
 - Verified end-to-end: login as admin@skyhawk.com / Admin123 → Manager Dashboard renders with live data.
 - Optional secrets NOT configured (features degrade gracefully): SENDGRID_API_KEY, SENDGRID_FROM_EMAIL (email), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER (SMS), EMERGENT_PUSH_KEY (push, set at deploy).
 - Fixed login failure from user's browser: preview proxy rewrites `Origin`, and `allow_credentials=True` made Starlette echo the rewritten origin → browser blocked POST after preflight. Set `allow_credentials=False` (Bearer auth, no cookies) so ACAO is `*`.
+
+## Deployment layer — Openship (June 2026)
+- Repo is now "ready to ship on Openship": `openship.json` → `docker-compose.yml` (5 services: edge [public nginx router], api, manager-portal, guard-web, mongo).
+- Dockerfiles: `backend/Dockerfile`, `manager-portal/Dockerfile`, `frontend/Dockerfile.web` (expo web export), `deploy/edge/`.
+- Single hostname; edge routes `/api|/uploads|/docs` → api:8001, `/manager/*` → portal, `/*` → guard web. Frontends use relative `/api` (no CORS).
+- Volumes: `uploads` (pay stubs/attachments), `mongo-data`. Atlas supported via `MONGO_URL` + disabling mongo service.
+- Fixed `manager-portal/package-lock.json` Replit registry URLs (same issue as frontend yarn.lock).
+- Guide: `docs/DEPLOY_OPENSHIP.md`. Root `.env.example` documents all env vars.
+- Verified locally: compose YAML, all nginx configs (`nginx -t`), vite build, expo web export, and edge routing simulation (login POST via edge → 200).
