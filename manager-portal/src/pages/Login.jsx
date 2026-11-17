@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client.js';
+import { firstAllowedManagerPath } from '../auth/permissions.js';
 import { Bird, Lock, Mail, AlertCircle } from 'lucide-react';
 
 export default function Login() {
@@ -23,7 +24,7 @@ export default function Login() {
       }
       localStorage.setItem('mgr_token', data.access_token);
       localStorage.setItem('mgr_user', JSON.stringify(data.user));
-      navigate('/dashboard', { replace: true });
+      navigate(firstAllowedManagerPath(data.user), { replace: true });
     } catch (err) {
       setError(err.message || 'Invalid credentials');
     } finally {
@@ -47,7 +48,7 @@ export default function Login() {
         <div className="card space-y-5 shadow-sm">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Sign in</h2>
-            <p className="text-gray-500 text-sm mt-0.5">Admin credentials required</p>
+            <p className="text-gray-500 text-sm mt-0.5">Manager credentials required</p>
           </div>
 
           {error && (

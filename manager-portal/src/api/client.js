@@ -38,6 +38,7 @@ export const api = {
 
   // Auth
   login: (email, password) => request('POST', '/auth/login', { email, password }),
+  me: () => request('GET', '/auth/me'),
 
   // Dashboard
   dashboard: () => request('GET', '/admin/dashboard'),

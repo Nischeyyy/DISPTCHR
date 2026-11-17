@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../api/client.js';
+import { hasManagerPermission, MANAGER_PERMISSIONS } from '../auth/permissions.js';
 
 function playAlarm() {
   try {
@@ -32,34 +33,34 @@ const NAV_GROUPS = [
   {
     label: null,
     items: [
-      { to: 'dashboard',   icon: LayoutDashboard, label: 'Dashboard' },
-      { to: 'sos',         icon: AlertTriangle,   label: 'SOS Alerts',    isSos: true },
-      { to: 'live',        icon: Radio,           label: 'Live Locations' },
+      { to: 'dashboard',   icon: LayoutDashboard, label: 'Dashboard', permission: MANAGER_PERMISSIONS.dashboard },
+      { to: 'sos',         icon: AlertTriangle,   label: 'SOS Alerts', isSos: true, permission: MANAGER_PERMISSIONS.sos },
+      { to: 'live',        icon: Radio,           label: 'Live Locations', permission: MANAGER_PERMISSIONS.live },
     ]
   },
   {
     label: 'Operations',
     items: [
-      { to: 'guards',      icon: Users,           label: 'Guards' },
-      { to: 'sites',       icon: MapPin,          label: 'Sites' },
-      { to: 'shifts',      icon: Calendar,        label: 'Shifts' },
-      { to: 'open-shifts', icon: Briefcase,       label: 'Open Shifts' },
-      { to: 'swaps',       icon: ArrowLeftRight,  label: 'Shift Swaps' },
-      { to: 'timeclock',   icon: Clock,           label: 'Timeclock' },
+      { to: 'guards',      icon: Users,           label: 'Guards', permission: MANAGER_PERMISSIONS.guards },
+      { to: 'sites',       icon: MapPin,          label: 'Sites', permission: MANAGER_PERMISSIONS.sites },
+      { to: 'shifts',      icon: Calendar,        label: 'Shifts', permission: MANAGER_PERMISSIONS.shifts },
+      { to: 'open-shifts', icon: Briefcase,       label: 'Open Shifts', permission: MANAGER_PERMISSIONS['open-shifts'] },
+      { to: 'swaps',       icon: ArrowLeftRight,  label: 'Shift Swaps', permission: MANAGER_PERMISSIONS.swaps },
+      { to: 'timeclock',   icon: Clock,           label: 'Timeclock', permission: MANAGER_PERMISSIONS.timeclock },
     ]
   },
   {
     label: 'Management',
     items: [
-      { to: 'incidents',   icon: FileText,        label: 'Incidents' },
-      { to: 'payroll',     icon: DollarSign,      label: 'Payroll' },
+      { to: 'incidents',   icon: FileText,        label: 'Incidents', permission: MANAGER_PERMISSIONS.incidents },
+      { to: 'payroll',     icon: DollarSign,      label: 'Payroll', permission: MANAGER_PERMISSIONS.payroll },
     ]
   },
   {
     label: 'Admin',
     items: [
-      { to: 'announcements', icon: Megaphone,     label: 'Announcements' },
-      { to: 'compliance',  icon: ShieldCheck,     label: 'Compliance' },
+      { to: 'announcements', icon: Megaphone,     label: 'Announcements', permission: MANAGER_PERMISSIONS.announcements },
+      { to: 'compliance',  icon: ShieldCheck,     label: 'Compliance', permission: MANAGER_PERMISSIONS.compliance },
     ]
   }
 ];
@@ -98,8 +99,15 @@ export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sosAlerts, setSosAlerts] = useState([]);
   const [sosBannerDismissed, setSosBannerDismissed] = useState(false);
+  const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('mgr_user') || '{}'));
   const prevSosCount = useRef(0);
-  const user = JSON.parse(localStorage.getItem('mgr_user') || '{}');
+  const canUseSos = hasManagerPermission(user, MANAGER_PERMISSIONS.sos);
+  const visibleNavGroups = NAV_GROUPS
+    .map(group => ({ ...group, items: group.items.filter(item => hasManagerPermission(user, item.permission)) }))
+    .filter(group => group.items.length > 0);
+  const currentRouteKey = location.pathname.split('/').filter(Boolean)[0] || 'dashboard';
+  const currentPermission = MANAGER_PERMISSIONS[currentRouteKey];
+  const canViewCurrentPage = !currentPermission || hasManagerPermission(user, currentPermission);
 
   const sosCount = sosAlerts.length;
   useEffect(() => {
@@ -111,17 +119,39 @@ export default function Layout() {
   }, [sosCount]);
 
   const pollSos = useCallback(async () => {
+    if (!canUseSos) {
+      setSosAlerts([]);
+      return;
+    }
     try {
       const data = await api.sosActive();
       setSosAlerts(data.alerts || []);
     } catch (_) {}
-  }, []);
+  }, [canUseSos]);
 
   useEffect(() => {
     pollSos();
     const t = setInterval(pollSos, 4000);
     return () => clearInterval(t);
   }, [pollSos]);
+
+  useEffect(() => {
+    let active = true;
+    async function syncAccess() {
+      try {
+        const currentUser = await api.me();
+        if (!active || !currentUser) return;
+        localStorage.setItem('mgr_user', JSON.stringify(currentUser));
+        setUser(currentUser);
+      } catch (_) {}
+    }
+    syncAccess();
+    const timer = setInterval(syncAccess, 15000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
 
   function logout() {
     localStorage.removeItem('mgr_token');
@@ -130,8 +160,8 @@ export default function Layout() {
   }
 
   let currentPageTitle = 'Dashboard';
-  for (const group of NAV_GROUPS) {
-    const found = group.items.find(item => location.pathname.includes(item.to));
+  for (const group of visibleNavGroups) {
+    const found = group.items.find(item => item.to === currentRouteKey);
     if (found) { currentPageTitle = found.label; break; }
   }
 
@@ -154,7 +184,7 @@ export default function Layout() {
 
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto p-3 space-y-6">
-        {NAV_GROUPS.map((group, i) => (
+        {visibleNavGroups.map((group, i) => (
           <div key={i} className="space-y-1">
             {group.label && (
               <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-2">
@@ -282,7 +312,17 @@ export default function Layout() {
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto px-4 py-6 lg:px-8 lg:py-8 bg-white">
-          <Outlet />
+          {canViewCurrentPage ? (
+            <Outlet />
+          ) : (
+            <section className="max-w-2xl border border-amber-200 bg-amber-50 rounded-xl p-6">
+              <h1 className="text-xl font-bold text-gray-900">Access not assigned</h1>
+              <p className="text-sm text-gray-600 mt-2">
+                This manager account does not have access to this area. A company director can enable it in
+                Disptchr Panel under Access &amp; Roles.
+              </p>
+            </section>
+          )}
         </main>
       </div>
     </div>

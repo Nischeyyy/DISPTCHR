@@ -31,19 +31,19 @@ export default function App() {
 
         {/* Protected — pathless layout route, children define their own paths */}
         <Route element={<ProtectedLayout />}>
-          <Route path="dashboard"    element={<Dashboard />} />
-          <Route path="guards"       element={<Guards />} />
-          <Route path="sites"        element={<Sites />} />
-          <Route path="shifts"       element={<Shifts />} />
-          <Route path="open-shifts"  element={<OpenShifts />} />
-          <Route path="swaps"        element={<ShiftSwaps />} />
-          <Route path="timeclock"    element={<Timeclock />} />
-          <Route path="incidents"    element={<Incidents />} />
-          <Route path="sos"          element={<SosAlerts />} />
-          <Route path="payroll"      element={<Payroll />} />
+          <Route path="dashboard" element={<Dashboard />} />
+          <Route path="guards" element={<Guards />} />
+          <Route path="sites" element={<Sites />} />
+          <Route path="shifts" element={<Shifts />} />
+          <Route path="open-shifts" element={<OpenShifts />} />
+          <Route path="swaps" element={<ShiftSwaps />} />
+          <Route path="timeclock" element={<Timeclock />} />
+          <Route path="incidents" element={<Incidents />} />
+          <Route path="sos" element={<SosAlerts />} />
+          <Route path="payroll" element={<Payroll />} />
           <Route path="announcements" element={<Announcements />} />
-          <Route path="compliance"   element={<Compliance />} />
-          <Route path="live"         element={<LiveLocations />} />
+          <Route path="compliance" element={<Compliance />} />
+          <Route path="live" element={<LiveLocations />} />
         </Route>
 
         {/* Catch-all redirect */}

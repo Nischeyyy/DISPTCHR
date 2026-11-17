@@ -4,14 +4,16 @@ JWT-based authentication, shift management, time clock, wallet, incidents, payro
 import io
 import re
 import os
+import hmac
 import uuid
 import json
 import logging
 import secrets
 import mimetypes
 from pathlib import Path
+from urllib.parse import unquote
 from datetime import datetime, timedelta, timezone, date
-from typing import Optional, List, Annotated
+from typing import Optional, List, Annotated, Literal
 from contextlib import asynccontextmanager
 
 import jwt
@@ -54,6 +56,7 @@ JWT_SECRET = _require_env("JWT_SECRET")
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
 EMERGENT_PUSH_KEY = os.environ.get("EMERGENT_PUSH_KEY", "placeholder")
+CONTROL_PANEL_API_KEY = os.environ.get("CONTROL_PANEL_API_KEY", "")
 PUSH_BASE_URL = "https://integrations.emergentagent.com"
 # The external push provider requires a real key; without one, skip the network
 # call entirely instead of generating a 401 for every notification attempt.
@@ -157,6 +160,73 @@ def create_access_token(user_id: str, email: str, role: str) -> str:
 
 bearer = HTTPBearer(auto_error=False)
 
+MANAGER_PERMISSION_CATALOG = [
+    {"key": "dashboard.view", "label": "Dashboard", "description": "View the manager overview and operational totals."},
+    {"key": "sos.manage", "label": "SOS Alerts", "description": "Acknowledge and resolve emergency alerts."},
+    {"key": "locations.view", "label": "Live Locations", "description": "View on-duty guard locations."},
+    {"key": "guards.manage", "label": "Guards", "description": "View and update guard records."},
+    {"key": "sites.manage", "label": "Sites", "description": "Create and maintain client sites."},
+    {"key": "scheduling.manage", "label": "Scheduling", "description": "Manage shifts, open shifts, and swaps."},
+    {"key": "timeclock.manage", "label": "Timeclock", "description": "Review and correct timeclock entries."},
+    {"key": "incidents.manage", "label": "Incidents", "description": "Review incidents and update their status."},
+    {"key": "payroll.manage", "label": "Payroll", "description": "Prepare, review, and release manager payroll records."},
+    {"key": "announcements.manage", "label": "Announcements", "description": "Publish announcements and moderate staff community posts."},
+    {"key": "compliance.view", "label": "Compliance", "description": "Review licences and compliance status."},
+]
+MANAGER_PERMISSION_KEYS = frozenset(item["key"] for item in MANAGER_PERMISSION_CATALOG)
+
+
+def normalize_manager_permissions(values: Optional[List[str]]) -> list[str]:
+    if values is None:
+        return []
+    return sorted({value for value in values if value in MANAGER_PERMISSION_KEYS})
+
+
+def enforce_manager_permission(user: dict, permission: str) -> None:
+    if user.get("role") != "admin":
+        return
+    if permission not in normalize_manager_permissions(user.get("manager_permissions")):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This manager access level is disabled")
+
+
+async def active_managers_with_permission(permission: str, projection: dict) -> list[dict]:
+    if permission not in MANAGER_PERMISSION_KEYS:
+        return []
+    return await db.users.find(
+        {
+            "role": "admin",
+            "access_status": "active",
+            "manager_permissions": permission,
+        },
+        projection,
+    ).to_list(500)
+
+
+def required_manager_permission(path: str) -> Optional[str]:
+    normalized = path.removeprefix("/api")
+    permission_routes = (
+        ("/admin/dashboard", "dashboard.view"),
+        ("/admin/guards", "guards.manage"),
+        ("/admin/sites", "sites.manage"),
+        ("/admin/shifts", "scheduling.manage"),
+        ("/admin/open-shifts", "scheduling.manage"),
+        ("/admin/shift-swaps", "scheduling.manage"),
+        ("/admin/timeclock", "timeclock.manage"),
+        ("/admin/incidents", "incidents.manage"),
+        ("/incidents", "incidents.manage"),
+        ("/admin/payroll", "payroll.manage"),
+        ("/payroll", "payroll.manage"),
+        ("/admin/announcements", "announcements.manage"),
+        ("/admin/community", "announcements.manage"),
+        ("/admin/compliance", "compliance.view"),
+        ("/ops/live-locations", "locations.view"),
+        ("/sos", "sos.manage"),
+    )
+    for prefix, permission in permission_routes:
+        if normalized.startswith(prefix):
+            return permission
+    return None
+
 
 async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
     if not creds:
@@ -174,6 +244,8 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "hashed_password": 0})
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+    if user.get("access_status", "active") != "active":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account access is disabled")
     return user
 
 
@@ -452,7 +524,18 @@ async def ensure_indexes():
     await db.community_posts.create_index([("type", 1), ("created_at", -1)])
     await db.password_resets.create_index("user_id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
+    await db.access_audit.create_index([("occurred_at", -1)])
     await db.notifications.create_index([("user_id", 1), ("read", 1)])
+    # One-time compatibility backfill. Once present, missing permission fields
+    # are treated as no access rather than silently granting future routes.
+    await db.users.update_many(
+        {"role": "admin", "access_status": {"$exists": False}},
+        {"$set": {"access_status": "active"}},
+    )
+    await db.users.update_many(
+        {"role": "admin", "manager_permissions": {"$exists": False}},
+        {"$set": {"manager_permissions": sorted(MANAGER_PERMISSION_KEYS)}},
+    )
 
 
 # ============================================================
@@ -476,6 +559,8 @@ async def seed_data():
             "full_name": "Admin Steele",
             "phone": "+1 416 555 0000",
             "role": "admin",
+            "access_status": "active",
+            "manager_permissions": sorted(MANAGER_PERMISSION_KEYS),
             "employee_number": "SH-0001",
             "licence_number": "SG-ADM-2026",
             "licence_expiry": iso(now_utc() + timedelta(days=400)),
@@ -493,6 +578,7 @@ async def seed_data():
             "full_name": "Marcus Vance",
             "phone": "+1 416 555 0142",
             "role": "employee",
+            "access_status": "active",
             "employee_number": "SH-2041",
             "licence_number": "SG-ON-89442",
             "licence_expiry": iso(now_utc() + timedelta(days=42)),
@@ -510,6 +596,7 @@ async def seed_data():
             "full_name": "Priya Kaur",
             "phone": "+1 647 555 0212",
             "role": "employee",
+            "access_status": "active",
             "employee_number": "SH-2088",
             "licence_number": "SG-ON-91201",
             "licence_expiry": iso(now_utc() + timedelta(days=180)),
@@ -734,6 +821,7 @@ async def register(request: Request, body: RegisterIn):
         "full_name": body.full_name,
         "phone": body.phone,
         "role": "employee",
+        "access_status": "active",
         "employee_number": f"SH-{str(uuid.uuid4())[:4].upper()}",
         "licence_number": None,
         "licence_expiry": None,
@@ -763,6 +851,10 @@ async def login(request: Request, body: LoginIn):
     user = await db.users.find_one({"email": body.email.lower()})
     if not user or not verify_password(body.password, user["hashed_password"]):
         raise HTTPException(401, "Invalid email or password")
+    if user.get("access_status", "active") != "active":
+        raise HTTPException(403, "This account has been disabled by company administration")
+    if user.get("role") == "admin":
+        user["manager_permissions"] = normalize_manager_permissions(user.get("manager_permissions"))
     token = create_access_token(user["id"], user["email"], user["role"])
     user.pop("hashed_password", None)
     user.pop("_id", None)
@@ -1575,9 +1667,147 @@ async def register_push(body: RegisterPushIn):
 # ADMIN — Dependency & Models
 # ============================================================
 
-async def require_admin(user=Depends(get_current_user)):
+async def require_control_panel(request: Request):
+    supplied_key = request.headers.get("x-disptchr-control-key", "")
+    if not CONTROL_PANEL_API_KEY:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Control panel integration is not configured")
+    if not supplied_key or not hmac.compare_digest(supplied_key, CONTROL_PANEL_API_KEY):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid control panel credentials")
+    return {
+        "id": request.headers.get("x-disptchr-actor-id", "control-panel-service").strip()[:120],
+        "name": unquote(
+            request.headers.get("x-disptchr-actor-name", "Disptchr Panel").strip()
+        )[:120],
+    }
+
+
+def manager_access_view(user: dict) -> dict:
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "full_name": user.get("full_name", ""),
+        "phone": user.get("phone"),
+        "status": user.get("access_status", "active"),
+        "permissions": normalize_manager_permissions(user.get("manager_permissions")),
+        "created_at": user.get("created_at"),
+        "access_updated_at": user.get("access_updated_at"),
+    }
+
+
+class ControlManagerCreateIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=10, max_length=128)
+    full_name: str = Field(min_length=2, max_length=120)
+    phone: Optional[str] = Field(default=None, max_length=40)
+    status: Literal["active", "disabled"] = "active"
+    permissions: List[str] = Field(default_factory=list)
+
+
+class ControlManagerUpdateIn(BaseModel):
+    full_name: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    phone: Optional[str] = Field(default=None, max_length=40)
+    status: Optional[Literal["active", "disabled"]] = None
+    permissions: Optional[List[str]] = None
+
+
+@api.get("/control/managers")
+async def control_list_managers(_control_actor=Depends(require_control_panel)):
+    managers = await db.users.find(
+        {"role": "admin"}, {"_id": 0, "hashed_password": 0}
+    ).sort("full_name", 1).to_list(500)
+    return {
+        "managers": [manager_access_view(manager) for manager in managers],
+        "permission_catalog": MANAGER_PERMISSION_CATALOG,
+    }
+
+
+@api.post("/control/managers", status_code=201)
+async def control_create_manager(body: ControlManagerCreateIn, control_actor=Depends(require_control_panel)):
+    email = body.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Email already registered")
+    manager = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "hashed_password": hash_password(body.password),
+        "full_name": body.full_name.strip(),
+        "phone": body.phone,
+        "role": "admin",
+        "access_status": body.status,
+        "manager_permissions": normalize_manager_permissions(body.permissions),
+        "employee_number": f"SH-M-{str(uuid.uuid4())[:4].upper()}",
+        "licence_number": None,
+        "licence_expiry": None,
+        "certifications": [],
+        "employment_status": "Management",
+        "photo_url": None,
+        "emergency_contact": None,
+        "onboarding_complete": True,
+        "created_at": iso(now_utc()),
+        "access_updated_at": iso(now_utc()),
+    }
+    await db.users.insert_one(manager)
+    await db.access_audit.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "manager.created",
+        "manager_id": manager["id"],
+        "manager_email": email,
+        "status": body.status,
+        "permissions": manager["manager_permissions"],
+        "before": None,
+        "after": manager_access_view(manager),
+        "actor": control_actor,
+        "source": "disptchr-panel",
+        "occurred_at": iso(now_utc()),
+    })
+    return manager_access_view(manager)
+
+
+@api.patch("/control/managers/{manager_id}")
+async def control_update_manager(
+    manager_id: str,
+    body: ControlManagerUpdateIn,
+    control_actor=Depends(require_control_panel),
+):
+    manager = await db.users.find_one({"id": manager_id, "role": "admin"})
+    if not manager:
+        raise HTTPException(404, "Manager account not found")
+    before = manager_access_view(manager)
+
+    update = body.model_dump(exclude_none=True)
+    if "full_name" in update:
+        update["full_name"] = update["full_name"].strip()
+    if "status" in update:
+        update["access_status"] = update.pop("status")
+    if "permissions" in update:
+        update["manager_permissions"] = normalize_manager_permissions(update.pop("permissions"))
+    update["access_updated_at"] = iso(now_utc())
+
+    await db.users.update_one({"id": manager_id}, {"$set": update})
+    updated = await db.users.find_one({"id": manager_id}, {"_id": 0, "hashed_password": 0})
+    await db.access_audit.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "manager.access_updated",
+        "manager_id": manager_id,
+        "manager_email": manager["email"],
+        "changes": {key: value for key, value in update.items() if key != "access_updated_at"},
+        "before": before,
+        "after": manager_access_view(updated),
+        "actor": control_actor,
+        "source": "disptchr-panel",
+        "occurred_at": iso(now_utc()),
+    })
+    return manager_access_view(updated)
+
+
+async def require_admin(request: Request, user=Depends(get_current_user)):
     if user.get("role") != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Manager access required")
+    required_permission = required_manager_permission(request.url.path)
+    if not required_permission:
+        logger.error("Manager route has no permission mapping: %s", request.url.path)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Manager route is not assigned to an access level")
+    enforce_manager_permission(user, required_permission)
     return user
 
 
@@ -1754,7 +1984,9 @@ async def admin_dashboard(admin=Depends(require_admin)):
 
 @api.get("/admin/guards")
 async def admin_list_guards(admin=Depends(require_admin)):
-    guards = await db.users.find({}, {"_id": 0, "hashed_password": 0}).sort("full_name", 1).to_list(500)
+    guards = await db.users.find(
+        {"role": "employee"}, {"_id": 0, "hashed_password": 0}
+    ).sort("full_name", 1).to_list(500)
     return {"guards": guards}
 
 
@@ -1767,6 +1999,7 @@ async def admin_create_guard(body: AdminCreateGuardIn, admin=Depends(require_adm
         "id": user_id, "email": body.email.lower(),
         "hashed_password": hash_password(body.password),
         "full_name": body.full_name, "phone": body.phone, "role": "employee",
+        "access_status": "active",
         "employee_number": body.employee_number or f"SH-{str(uuid.uuid4())[:4].upper()}",
         "licence_number": body.licence_number, "licence_expiry": body.licence_expiry,
         "certifications": body.certifications, "employment_status": body.employment_status,
@@ -1780,7 +2013,9 @@ async def admin_create_guard(body: AdminCreateGuardIn, admin=Depends(require_adm
 
 @api.get("/admin/guards/{guard_id}")
 async def admin_get_guard(guard_id: str, admin=Depends(require_admin)):
-    guard = await db.users.find_one({"id": guard_id}, {"_id": 0, "hashed_password": 0})
+    guard = await db.users.find_one(
+        {"id": guard_id, "role": "employee"}, {"_id": 0, "hashed_password": 0}
+    )
     if not guard:
         raise HTTPException(404, "Guard not found")
     recent_shifts = await db.shifts.find({"user_id": guard_id}, {"_id": 0}).sort("start", -1).to_list(10)
@@ -1807,10 +2042,12 @@ async def admin_update_guard(guard_id: str, body: AdminUpdateGuardIn, admin=Depe
     update = {k: v for k, v in body.model_dump().items() if v is not None}
     if not update:
         raise HTTPException(400, "No fields to update")
-    r = await db.users.update_one({"id": guard_id}, {"$set": update})
+    r = await db.users.update_one({"id": guard_id, "role": "employee"}, {"$set": update})
     if r.matched_count == 0:
         raise HTTPException(404, "Guard not found")
-    return await db.users.find_one({"id": guard_id}, {"_id": 0, "hashed_password": 0})
+    return await db.users.find_one(
+        {"id": guard_id, "role": "employee"}, {"_id": 0, "hashed_password": 0}
+    )
 
 
 # ============================================================
@@ -2389,14 +2626,17 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         "audit_trail": [],
     }
     await db.incidents.insert_one(incident)
-    admins = await db.users.find({"role": "admin"}, {"id": 1, "email": 1, "phone": 1, "_id": 0}).to_list(100)
+    admins = await active_managers_with_permission(
+        "sos.manage", {"id": 1, "email": 1, "phone": 1, "_id": 0}
+    )
     admin_ids = [a["id"] for a in admins]
     await send_push(
         admin_ids,
         {"title": f"🆘 SOS — {user['full_name']}", "message": f"{body.message or 'Guard needs immediate assistance'} · {body.latitude:.4f},{body.longitude:.4f}"},
         idempotency_key=f"sos-{alert_id}",
     )
-    # Email + SMS all admins — SOS is critical, use every channel
+    # SOS is critical, but only active managers explicitly assigned SOS access
+    # may receive precise guard location or contact details.
     sos_html = notif.email_template(
         f"🆘 SOS ALERT — {user['full_name']}",
         [
@@ -2416,7 +2656,7 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         *[notif.send_email(a["email"], f"🆘 SOS ALERT — {user['full_name']}", sos_html) for a in admins if a.get("email")],
         *[notif.send_sms(a["phone"], sms_body) for a in admins if a.get("phone")],
         notif.save_inapp(db, admin_ids, f"🆘 SOS — {user['full_name']}", body.message or "Guard needs immediate assistance", category="sos"),
-        notif.save_inapp(db, [user["id"]], "SOS Alert Sent", "Your emergency alert has been sent to all managers.", category="sos"),
+        notif.save_inapp(db, [user["id"]], "SOS Alert Sent", "Your emergency alert has been sent to authorized response managers.", category="sos"),
         return_exceptions=True,
     )
     logger.warning("SOS triggered by user %s at %s,%s", user["id"], body.latitude, body.longitude)
@@ -2503,7 +2743,9 @@ async def update_incident_status(inc_id: str, body: IncidentStatusIn, admin=Depe
 @api.get("/incidents/{inc_id}")
 async def get_incident(inc_id: str, user=Depends(get_current_user)):
     q: dict = {"id": inc_id}
-    if user["role"] != "admin":
+    if user["role"] == "admin":
+        enforce_manager_permission(user, "incidents.manage")
+    else:
         q["user_id"] = user["id"]
     inc = await db.incidents.find_one(q, {"_id": 0, "photos": 0, "signature_base64": 0})
     if not inc:
@@ -2610,7 +2852,8 @@ async def request_swap(shift_id: str, body: SwapRequestIn, user=Depends(get_curr
     }
     await db.shift_swaps.insert_one(swap)
     swap.pop("_id", None)
-    admin_ids = [u["id"] async for u in db.users.find({"role": "admin"}, {"id": 1, "_id": 0})]
+    managers = await active_managers_with_permission("scheduling.manage", {"id": 1, "_id": 0})
+    admin_ids = [manager["id"] for manager in managers]
     await send_push(admin_ids, {"title": "Shift Swap Requested", "message": f"{user['full_name']} wants to swap their {shift['start'][:10]} shift."})
     return swap
 
@@ -2635,7 +2878,8 @@ async def volunteer_swap(swap_id: str, user=Depends(get_current_user)):
         {"id": swap_id},
         {"$set": {"status": "accepted", "volunteer_id": user["id"], "volunteer_name": user["full_name"]}},
     )
-    admin_ids = [u["id"] async for u in db.users.find({"role": "admin"}, {"id": 1, "_id": 0})]
+    managers = await active_managers_with_permission("scheduling.manage", {"id": 1, "_id": 0})
+    admin_ids = [manager["id"] for manager in managers]
     await send_push(
         admin_ids + [swap["requester_id"]],
         {"title": "Swap Volunteer", "message": f"{user['full_name']} wants to cover {swap['requester_name']}'s shift on {swap['start'][:10]}."},
@@ -2815,7 +3059,9 @@ async def calculate_payroll(body: PayrollCalculateIn, admin=Depends(require_admi
 @api.get("/payroll/{period_id}/stub")
 async def payroll_stub(period_id: str, user=Depends(get_current_user)):
     q: dict = {"id": period_id}
-    if user["role"] != "admin":
+    if user["role"] == "admin":
+        enforce_manager_permission(user, "payroll.manage")
+    else:
         q["user_id"] = user["id"]
     period = await db.payroll.find_one(q, {"_id": 0})
     if not period:
@@ -3015,7 +3261,9 @@ async def admin_delete_community_post(post_id: str, admin=Depends(require_admin)
 @api.delete("/community/posts/{post_id}")
 async def delete_own_community_post(post_id: str, user=Depends(get_current_user)):
     q = {"id": post_id}
-    if user["role"] != "admin":
+    if user["role"] == "admin":
+        enforce_manager_permission(user, "announcements.manage")
+    else:
         q["author_id"] = user["id"]
     r = await db.community_posts.delete_one(q)
     if r.deleted_count == 0:
@@ -3026,7 +3274,9 @@ async def delete_own_community_post(post_id: str, user=Depends(get_current_user)
 @api.put("/community/posts/{post_id}")
 async def edit_own_community_post(post_id: str, body: CommunityEditIn, user=Depends(get_current_user)):
     q = {"id": post_id}
-    if user["role"] != "admin":
+    if user["role"] == "admin":
+        enforce_manager_permission(user, "announcements.manage")
+    else:
         q["author_id"] = user["id"]
     r = await db.community_posts.update_one(
         q,
