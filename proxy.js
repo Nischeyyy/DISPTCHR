@@ -9,7 +9,7 @@ const http = require('http');
 const BACKEND_PORT = 8000;
 const FRONTEND_PORT = 8080;
 const MANAGER_PORT = 8081;
-const PROXY_PORT = 5000;
+const PROXY_PORT = Number(process.env.DISPTCHR_PROXY_PORT || 5000);
 
 function forward(req, res, targetPort) {
   // Preserve the original Host header (the public Replit domain) instead of

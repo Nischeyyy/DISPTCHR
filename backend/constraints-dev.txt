@@ -1,0 +1,5 @@
+# Python 3.9 on the current macOS development machine needs the published wheel
+# from this release instead of a newer source build requiring system OpenSSL.
+cryptography==43.0.3
+# ReportLab 5 requires Python 3.10; this workspace currently uses Python 3.9.
+reportlab==4.2.5

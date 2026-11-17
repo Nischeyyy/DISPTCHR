@@ -43,6 +43,7 @@ start_service() {
 }
 
 cleanup() {
+  trap - INT TERM EXIT
   if [ "${#PIDS[@]}" -gt 0 ]; then
     echo
     echo "Stopping combined development services..."
@@ -51,6 +52,40 @@ cleanup() {
     done
     wait "${PIDS[@]}" 2>/dev/null || true
   fi
+}
+
+wait_for_port() {
+  local name="$1"
+  local port="$2"
+  local attempts=60
+
+  while [ "$attempts" -gt 0 ]; do
+    if port_is_open "$port"; then
+      return 0
+    fi
+    attempts=$((attempts - 1))
+    sleep 1
+  done
+
+  echo "! $name did not become ready on port $port. Check work/dev-logs/$name.log."
+  return 1
+}
+
+wait_for_http() {
+  local name="$1"
+  local url="$2"
+  local attempts=60
+
+  while [ "$attempts" -gt 0 ]; do
+    if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts - 1))
+    sleep 1
+  done
+
+  echo "! $name did not become healthy. Check work/dev-logs/$name.log."
+  return 1
 }
 
 trap cleanup INT TERM EXIT
@@ -76,27 +111,40 @@ if [ ! -d "$PANEL_DIR/node_modules" ]; then
   exit 1
 fi
 
+if [ ! -d "$DISPTCHR_DIR/dev-infra/node_modules" ]; then
+  echo "DISPTCHR local database dependencies are missing. Run:"
+  echo "  cd DISPTCHR/dev-infra && npm install"
+  exit 1
+fi
+
+if [ ! -x "$DISPTCHR_DIR/.venv/bin/uvicorn" ]; then
+  echo "DISPTCHR backend dependencies are missing. Run:"
+  echo "  python3 -m venv DISPTCHR/.venv"
+  echo "  DISPTCHR/.venv/bin/pip install -r DISPTCHR/backend/requirements-dev.txt"
+  exit 1
+fi
+
+python3 "$DISPTCHR_DIR/scripts/setup-dev-env.py"
+
+if grep -Eq '^MONGO_URL=mongodb://(127\.0\.0\.1|localhost):27017/?$' "$DISPTCHR_DIR/backend/.env"; then
+  start_service "mongodb" 27017 "$DISPTCHR_DIR" node dev-infra/mongo.mjs
+  wait_for_port "mongodb" 27017 || exit 1
+fi
+
+start_service "api" 8000 "$DISPTCHR_DIR/backend" "$DISPTCHR_DIR/.venv/bin/uvicorn" server:app --host 127.0.0.1 --port 8000 --reload
+wait_for_http "api" "http://127.0.0.1:8000/api/health" || exit 1
+
 start_service "employee-app" 8080 "$DISPTCHR_DIR/frontend" env CI=1 corepack yarn web --port 8080
 start_service "manager-portal" 8081 "$DISPTCHR_DIR/manager-portal" npm run dev
 start_service "control-panel" 3000 "$PANEL_DIR" npm run dev -- --hostname 127.0.0.1
-
-if [ -f "$DISPTCHR_DIR/backend/.env" ]; then
-  if [ -x "$DISPTCHR_DIR/.venv/bin/uvicorn" ]; then
-    start_service "api" 8000 "$DISPTCHR_DIR/backend" "$DISPTCHR_DIR/.venv/bin/uvicorn" server:app --host 127.0.0.1 --port 8000 --reload
-  elif command -v uvicorn >/dev/null 2>&1; then
-    start_service "api" 8000 "$DISPTCHR_DIR/backend" uvicorn server:app --host 127.0.0.1 --port 8000 --reload
-  else
-    echo "! Backend .env exists, but uvicorn is not installed; API was not started."
-  fi
-else
-  echo "! DISPTCHR API not started: backend/.env is not configured."
-fi
+start_service "gateway" 5050 "$DISPTCHR_DIR" env DISPTCHR_PROXY_PORT=5050 node proxy.js
 
 echo
 echo "DISPTCHR development workspace"
-echo "  Employee app:  http://127.0.0.1:8080"
-echo "  Manager portal: http://127.0.0.1:8081/manager/"
+echo "  Employee app:  http://127.0.0.1:5050"
+echo "  Manager portal: http://127.0.0.1:5050/manager/"
 echo "  Control panel:  http://127.0.0.1:3000"
+echo "  API docs:       http://127.0.0.1:5050/docs"
 echo
 echo "Press Control-C to stop services started by this launcher."
 
