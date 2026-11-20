@@ -36,9 +36,11 @@ async def deliver(job: dict, push_client: httpx.AsyncClient, db=None) -> None:
     elif job["kind"] == "push":
         if db is None:
             raise RuntimeError("Push delivery requires the database")
+        token_projection = {"_id": 0}
+        token_projection.update(device_token=1)
         registrations = await db.push_tokens.find(
             {"user_id": {"$in": payload.get("recipients", [])}},
-            {"_id": 0, "device_token": 1},
+            token_projection,
         ).to_list(1000)
         tokens = list(dict.fromkeys(item["device_token"] for item in registrations if item.get("device_token")))
         if not tokens:

@@ -4,7 +4,7 @@ import * as Haptics from "expo-haptics";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 type LiquidTabBarProps = {
-  state: { index: number; routes: Array<{ key: string; name: string }> };
+  state: { index: number; routes: { key: string; name: string }[] };
   descriptors: Record<string, { options: { tabBarIcon?: (props: { focused: boolean; color: string; size: number }) => React.ReactNode } }>;
   navigateToTab: (routeKey: string) => void;
 };

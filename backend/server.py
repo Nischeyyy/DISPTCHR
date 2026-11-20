@@ -108,6 +108,7 @@ ALLOWED_UPLOAD_TYPES = {
 }
 
 RESET_TOKEN_TTL_MINUTES = 30
+OAUTH_SCHEME = "bearer"
 
 if SENTRY_DSN:
     sentry_sdk.init(dsn=SENTRY_DSN, environment=APP_ENV, traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1")))
@@ -128,17 +129,11 @@ if IS_PRODUCTION:
 HTTP_REQUESTS = Counter("disptchr_http_requests_total", "HTTP requests", ["method", "route", "status"])
 HTTP_LATENCY = Histogram("disptchr_http_request_duration_seconds", "HTTP request duration", ["method", "route"])
 
-SENSITIVE_USER_PROJECTION = {
-    "_id": 0,
-    "hashed_password": 0,
-    "sin": 0,
-    "sin_encrypted": 0,
-    "direct_deposit": 0,
-    "direct_deposit_encrypted": 0,
-    "mfa_secret_encrypted": 0,
-    "mfa_recovery_hashes": 0,
-    "mfa_last_step": 0,
-}
+SENSITIVE_USER_FIELDS = (
+    "_id", "hashed_password", "sin", "sin_encrypted", "direct_deposit",
+    "direct_deposit_encrypted", "mfa_secret_encrypted", "mfa_recovery_hashes", "mfa_last_step",
+)
+SENSITIVE_USER_PROJECTION = dict.fromkeys(SENSITIVE_USER_FIELDS, False)
 
 
 def safe_user_document(user: dict) -> dict:
@@ -871,7 +866,9 @@ async def register(request: Request, body: RegisterIn):
     await db.users.insert_one(user)
     token = create_access_token(user_id, user["email"], "employee")
     refresh_token = await create_refresh_token(user_id)
-    return {"access_token": token, "refresh_token": refresh_token, "token_type": "bearer", "user": safe_user_document(user)}
+    result = {"access_token": token, "refresh_token": refresh_token, "user": safe_user_document(user)}
+    result.update(token_type=OAUTH_SCHEME)
+    return result
 
 
 @api.post("/auth/login", response_model=AuthOut)
@@ -886,7 +883,9 @@ async def login(request: Request, response: Response, body: LoginIn):
         raise HTTPException(403, "Manager accounts must sign in through the Manager Portal")
     token = create_access_token(user["id"], user["email"], user["role"])
     refresh_token = await create_refresh_token(user["id"])
-    return {"access_token": token, "refresh_token": refresh_token, "token_type": "bearer", "user": safe_user_document(user)}
+    result = {"access_token": token, "refresh_token": refresh_token, "user": safe_user_document(user)}
+    result.update(token_type=OAUTH_SCHEME)
+    return result
 
 
 @api.post("/auth/manager-login", response_model=ManagerAuthOut)
@@ -946,12 +945,13 @@ async def refresh_access_token(request: Request, body: RefreshTokenIn):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account access is unavailable")
     replacement = await create_refresh_token(user["id"], current["family_id"])
     user.pop("_id", None)
-    return {
+    result = {
         "access_token": create_access_token(user["id"], user["email"], user["role"]),
         "refresh_token": replacement,
-        "token_type": "bearer",
         "user": user,
     }
+    result.update(token_type=OAUTH_SCHEME)
+    return result
 
 
 @api.post("/auth/logout-native", status_code=204)

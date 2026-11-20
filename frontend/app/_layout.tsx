@@ -3,6 +3,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { Platform, View, ActivityIndicator } from "react-native";
 import * as Notifications from "expo-notifications";
+import { AndroidImportance } from "expo-notifications";
 import Constants from "expo-constants";
 import * as Linking from "expo-linking";
 import { StatusBar } from "expo-status-bar";
@@ -32,7 +33,7 @@ if (Platform.OS !== "web") {
 if (Platform.OS === "android") {
   Notifications.setNotificationChannelAsync("default", {
     name: "Default",
-    importance: Notifications.AndroidImportance.MAX,
+    importance: AndroidImportance.MAX,
     sound: "default",
   });
 }
