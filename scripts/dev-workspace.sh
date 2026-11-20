@@ -42,6 +42,27 @@ start_service() {
   echo "→ Starting $name on port $port (log: work/dev-logs/$name.log)"
 }
 
+start_background_service() {
+  local name="$1"
+  local process_pattern="$2"
+  local directory="$3"
+  shift 3
+
+  if pgrep -f "$process_pattern" >/dev/null 2>&1; then
+    echo "✓ $name already running"
+    return
+  fi
+
+  (
+    cd "$directory" || exit 1
+    exec "$@"
+  ) >"$LOG_DIR/$name.log" 2>&1 &
+
+  local pid=$!
+  PIDS+=("$pid")
+  echo "→ Starting $name (log: work/dev-logs/$name.log)"
+}
+
 cleanup() {
   trap - INT TERM EXIT
   if [ "${#PIDS[@]}" -gt 0 ]; then
@@ -133,6 +154,7 @@ fi
 
 start_service "api" 8000 "$DISPTCHR_DIR/backend" "$DISPTCHR_DIR/.venv/bin/uvicorn" server:app --host 127.0.0.1 --port 8000 --reload
 wait_for_http "api" "http://127.0.0.1:8000/api/health" || exit 1
+start_background_service "notification-worker" "$DISPTCHR_DIR/backend/job_worker.py" "$DISPTCHR_DIR/backend" "$DISPTCHR_DIR/.venv/bin/python" "$DISPTCHR_DIR/backend/job_worker.py"
 
 start_service "employee-app" 8080 "$DISPTCHR_DIR/frontend" env CI=1 corepack yarn web --port 8080
 start_service "manager-portal" 8081 "$DISPTCHR_DIR/manager-portal" npm run dev

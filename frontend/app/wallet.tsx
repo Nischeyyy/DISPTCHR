@@ -1,10 +1,11 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, ActivityIndicator, Pressable } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/api/client";
 import { formatDate } from "@/src/utils/format";
+import QRCode from "react-native-qrcode-svg";
 
 // ─── Light palette (matches Profile / Schedule) ─────────────────────────────
 const C = {
@@ -43,6 +44,12 @@ export default function Wallet() {
     setLoading(false);
   }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+  useEffect(() => {
+    if (!data?.qr_expires_in_seconds) return;
+    const refreshAfterMs = Math.max(30, Number(data.qr_expires_in_seconds) - 30) * 1000;
+    const timer = setTimeout(() => { void load(); }, refreshAfterMs);
+    return () => clearTimeout(timer);
+  }, [data?.qr_payload, data?.qr_expires_in_seconds, load]);
 
   if (loading) {
     return (
@@ -59,7 +66,7 @@ export default function Wallet() {
         <Header router={router} />
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 20 }}>
           <Text style={{ color: C.textSecondary, fontSize: 15, textAlign: "center" }}>
-            Couldn't load your wallet. Pull to refresh.
+            Couldn’t load your wallet. Pull to refresh.
           </Text>
         </View>
       </SafeAreaView>
@@ -124,7 +131,7 @@ export default function Wallet() {
           <Text style={styles.idRole}>{emp.employment_status}</Text>
           <View style={styles.qrRow}>
             <View style={styles.qrBox}>
-              <MockQR value={data.qr_payload} />
+              <QRCode value={data.qr_payload} size={84} backgroundColor="#FFFFFF" color="#000000" quietZone={4} />
             </View>
             <View style={{ flex: 1, marginLeft: 20 }}>
               <Text style={styles.qrLabel}>SCAN AT SITE</Text>
@@ -188,37 +195,6 @@ function Header({ router }: { router: ReturnType<typeof useRouter> }) {
         <Ionicons name="chevron-back" size={26} color={C.text} />
       </Pressable>
       <Text style={styles.title}>Wallet</Text>
-    </View>
-  );
-}
-
-function MockQR({ value }: { value: string }) {
-  const size = 11;
-  const cells: boolean[] = [];
-  let hash = 0;
-  for (let i = 0; i < value.length; i++) hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-  for (let i = 0; i < size * size; i++) {
-    hash = (hash * 1103515245 + 12345) >>> 0;
-    cells.push((hash & 1) === 1);
-  }
-  const corner = (r: number, c: number) =>
-    (r < 3 && c < 3) || (r < 3 && c > size - 4) || (r > size - 4 && c < 3);
-  const cell = 84 / size;
-  return (
-    <View style={{ width: 100, height: 100, backgroundColor: "#fff", padding: 8, borderRadius: 6 }}>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", width: 84, height: 84 }}>
-        {cells.map((on, i) => {
-          const r = Math.floor(i / size);
-          const c = i % size;
-          const filled = corner(r, c) || on;
-          return (
-            <View
-              key={i}
-              style={{ width: cell, height: cell, backgroundColor: filled ? "#000" : "transparent" }}
-            />
-          );
-        })}
-      </View>
     </View>
   );
 }

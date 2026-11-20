@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Users, MapPin, Calendar, Briefcase,
   ArrowLeftRight, Clock, FileText, AlertTriangle, DollarSign,
   Megaphone, ShieldCheck, Radio, LogOut, Menu, X, Bird,
-  ChevronDown, PhoneCall
+  ChevronDown, PhoneCall, QrCode
 } from 'lucide-react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../api/client.js';
@@ -42,6 +42,7 @@ const NAV_GROUPS = [
     label: 'Operations',
     items: [
       { to: 'guards',      icon: Users,           label: 'Guards', permission: MANAGER_PERMISSIONS.guards },
+      { to: 'badge-verify', icon: QrCode,          label: 'Verify Employee ID', permission: MANAGER_PERMISSIONS['badge-verify'] },
       { to: 'sites',       icon: MapPin,          label: 'Sites', permission: MANAGER_PERMISSIONS.sites },
       { to: 'shifts',      icon: Calendar,        label: 'Shifts', permission: MANAGER_PERMISSIONS.shifts },
       { to: 'open-shifts', icon: Briefcase,       label: 'Open Shifts', permission: MANAGER_PERMISSIONS['open-shifts'] },
@@ -153,8 +154,8 @@ export default function Layout() {
     };
   }, []);
 
-  function logout() {
-    localStorage.removeItem('mgr_token');
+  async function logout() {
+    try { await api.logout(); } catch { /* local sign-out still completes */ }
     localStorage.removeItem('mgr_user');
     navigate('/');
   }

@@ -48,7 +48,7 @@ export default function TabsLayout() {
         options={{
           title: "Today",
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? "today" : "today-outline"} size={22} color={color} />
+            <Ionicons name={focused ? "today" : "today-outline"} size={22} color={String(color)} />
           ),
         }}
       />
@@ -57,7 +57,7 @@ export default function TabsLayout() {
         options={{
           title: "Schedule",
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? "calendar" : "calendar-outline"} size={22} color={color} />
+            <Ionicons name={focused ? "calendar" : "calendar-outline"} size={22} color={String(color)} />
           ),
         }}
       />
@@ -66,7 +66,7 @@ export default function TabsLayout() {
         options={{
           title: "Shifts",
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? "list" : "list-outline"} size={22} color={color} />
+            <Ionicons name={focused ? "list" : "list-outline"} size={22} color={String(color)} />
           ),
         }}
       />
@@ -75,7 +75,7 @@ export default function TabsLayout() {
         options={{
           title: "Alerts",
           tabBarIcon: ({ color, focused }) => (
-            <BellIcon color={color} focused={focused} />
+            <BellIcon color={String(color)} focused={focused} />
           ),
         }}
       />
@@ -84,7 +84,7 @@ export default function TabsLayout() {
         options={{
           title: "Community",
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons name={focused ? "people" : "people-outline"} size={22} color={color} />
+            <Ionicons name={focused ? "people" : "people-outline"} size={22} color={String(color)} />
           ),
         }}
       />
@@ -96,7 +96,7 @@ export default function TabsLayout() {
             <Ionicons
               name={focused ? "person-circle" : "person-circle-outline"}
               size={26}
-              color={color}
+              color={String(color)}
             />
           ),
         }}

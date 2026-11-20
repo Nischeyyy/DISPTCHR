@@ -110,11 +110,6 @@ export default function Onboarding() {
     resetForms();
   };
 
-  const refresh = async () => {
-    setLoading(true);
-    await load();
-  };
-
   const submitStep = async (apiPath: string, body: any) => {
     setSubmitting(true);
     try {
@@ -252,7 +247,7 @@ export default function Onboarding() {
           {complete && (
             <View style={styles.completeBanner}>
               <Ionicons name="checkmark-circle" size={18} color={W.verified} />
-              <Text style={styles.completeText}>Onboarding complete — you're ready to work.</Text>
+              <Text style={styles.completeText}>Onboarding complete — you’re ready to work.</Text>
             </View>
           )}
         </View>

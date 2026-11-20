@@ -7,7 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
-import { api, apiUpload } from "@/src/api/client";
+import { api, apiUpload, getProtectedFileUrl } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
 import { relativeTime } from "@/src/utils/format";
 import { success as hapticSuccess } from "@/src/utils/haptics";
@@ -78,8 +78,8 @@ export default function Community() {
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
-  const composerInputRef = useRef<TextInput>(null);
-  const scrollRef = useRef<ScrollView>(null);
+  const composerInputRef = useRef<React.ComponentRef<typeof TextInput>>(null);
+  const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const isAdmin = user?.role === "admin";
 
   const load = useCallback(async (f: string) => {
@@ -131,6 +131,15 @@ export default function Community() {
   };
 
   const canManage = (p: any) => isAdmin || p.author_id === user?.id;
+
+  const openAttachment = async (path?: string) => {
+    if (!path) return;
+    try {
+      await Linking.openURL(await getProtectedFileUrl(path));
+    } catch (e: any) {
+      Alert.alert("Could not open file", e.message || "The file link could not be created.");
+    }
+  };
 
   const deletePost = (id: string) => {
     Alert.alert("Delete post", "Remove this post for everyone?", [
@@ -428,7 +437,7 @@ export default function Community() {
                         key={i}
                         testID={`attachment-${p.id}-${i}`}
                         style={styles.attachmentCard}
-                        onPress={() => a.url && Linking.openURL(`${process.env.EXPO_PUBLIC_BACKEND_URL || ""}${a.url}`)}
+                        onPress={() => openAttachment(a.url)}
                         accessibilityLabel={`Open ${a.name}`}
                         accessibilityRole="button"
                       >

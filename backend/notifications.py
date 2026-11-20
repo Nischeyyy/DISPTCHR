@@ -1,17 +1,22 @@
 """
 Skyhawk Security Operations — Unified Notification Module
 Handles email (SendGrid), SMS (Twilio), and in-app (MongoDB) notifications.
-Push notifications are handled separately in server.py via the Emergent client.
+Expo push delivery is handled by the durable outbox worker in job_worker.py.
 
-All channels degrade gracefully when credentials are absent — the app keeps
-working, messages are logged, and no errors are surfaced to users.
+Development can omit external channels. Production configuration validation
+requires email and SMS credentials before the API starts.
 """
-import asyncio
 import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
+
+import httpx
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).with_name(".env"))
 
 logger = logging.getLogger("skyhawk.notifications")
 
@@ -26,34 +31,6 @@ TWILIO_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TWILIO_FROM   = os.environ.get("TWILIO_FROM_NUMBER", "")
 SMS_ENABLED   = bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM)
 
-# Lazy-initialised SDK clients (created on first use, never cached across
-# module reloads so env-var changes take effect without restarting).
-_sg_client = None
-_tw_client = None
-
-
-def _get_sg():
-    global _sg_client
-    if _sg_client is None and EMAIL_ENABLED:
-        try:
-            from sendgrid import SendGridAPIClient  # type: ignore
-            _sg_client = SendGridAPIClient(SENDGRID_API_KEY)
-        except ImportError:
-            logger.warning("sendgrid package not installed — email disabled. Run: pip install sendgrid")
-    return _sg_client
-
-
-def _get_tw():
-    global _tw_client
-    if _tw_client is None and SMS_ENABLED:
-        try:
-            from twilio.rest import Client  # type: ignore
-            _tw_client = Client(TWILIO_SID, TWILIO_TOKEN)
-        except ImportError:
-            logger.warning("twilio package not installed — SMS disabled. Run: pip install twilio")
-    return _tw_client
-
-
 def log_status() -> None:
     """Log which notification channels are active at startup."""
     logger.info(
@@ -61,32 +38,6 @@ def log_status() -> None:
         "enabled" if EMAIL_ENABLED else "disabled (SENDGRID_API_KEY missing)",
         "enabled" if SMS_ENABLED else "disabled (TWILIO_* vars missing)",
     )
-
-
-# ── Email ─────────────────────────────────────────────────────────────────────
-
-def _send_email_sync(to: str, subject: str, body_html: str, body_text: str) -> bool:
-    """Synchronous SendGrid send — run via asyncio.to_thread()."""
-    try:
-        from sendgrid.helpers.mail import Mail  # type: ignore
-        sg = _get_sg()
-        if not sg:
-            return False
-        msg = Mail(
-            from_email=SENDGRID_FROM,
-            to_emails=to,
-            subject=subject,
-            html_content=body_html,
-            plain_text_content=body_text,
-        )
-        resp = sg.send(msg)
-        ok = resp.status_code < 300
-        if not ok:
-            logger.warning("SendGrid returned %s for %s", resp.status_code, to)
-        return ok
-    except Exception as exc:
-        logger.warning("Email send failed (non-blocking): %s", exc)
-        return False
 
 
 async def send_email(
@@ -97,28 +48,30 @@ async def send_email(
 ) -> bool:
     """Send a transactional email via SendGrid. Returns True on success."""
     if not EMAIL_ENABLED:
-        logger.debug("Email not configured — skipping: %s → %s", subject, to)
+        logger.debug("Email not configured — skipping message")
         return False
-    sg = _get_sg()
-    if not sg:
-        return False
-    return await asyncio.to_thread(
-        _send_email_sync, to, subject, body_html, body_text or ""
-    )
-
-
-# ── SMS ───────────────────────────────────────────────────────────────────────
-
-def _send_sms_sync(to_phone: str, body: str) -> bool:
-    """Synchronous Twilio send — run via asyncio.to_thread()."""
+    payload = {
+        "personalizations": [{"to": [{"email": to}]}],
+        "from": {"email": SENDGRID_FROM},
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": body_text or ""},
+            {"type": "text/html", "value": body_html},
+        ],
+    }
     try:
-        tw = _get_tw()
-        if not tw:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}"},
+                json=payload,
+            )
+        if response.status_code >= 300:
+            logger.warning("SendGrid rejected a message with status %s", response.status_code)
             return False
-        tw.messages.create(body=body, from_=TWILIO_FROM, to=to_phone)
         return True
-    except Exception as exc:
-        logger.warning("SMS send failed (non-blocking) to %s: %s", to_phone, exc)
+    except httpx.HTTPError as exc:
+        logger.warning("SendGrid delivery failed: %s", type(exc).__name__)
         return False
 
 
@@ -129,10 +82,20 @@ async def send_sms(to_phone: str, body: str) -> bool:
         return False
     if not to_phone or not to_phone.strip():
         return False
-    tw = _get_tw()
-    if not tw:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json",
+                auth=(TWILIO_SID, TWILIO_TOKEN),
+                data={"Body": body, "From": TWILIO_FROM, "To": to_phone},
+            )
+        if response.status_code >= 300:
+            logger.warning("Twilio rejected a message with status %s", response.status_code)
+            return False
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning("Twilio delivery failed: %s", type(exc).__name__)
         return False
-    return await asyncio.to_thread(_send_sms_sync, to_phone, body)
 
 
 # ── In-App Notifications ──────────────────────────────────────────────────────

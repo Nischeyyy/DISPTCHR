@@ -16,6 +16,7 @@ const server = await MongoMemoryServer.create({
     dbName: "skyhawk_ops",
     dbPath: dataDirectory,
     storageEngine: "wiredTiger",
+    launchTimeout: 60_000,
   },
 });
 

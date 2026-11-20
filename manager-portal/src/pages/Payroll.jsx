@@ -5,12 +5,9 @@ import Badge from '../components/Badge.jsx';
 import Modal from '../components/Modal.jsx';
 import EmptyState from '../components/EmptyState.jsx';
 import PayrollDashboard from '../components/PayrollDashboard.jsx';
-import PayrollFeaturePanel, { loadFeatures, saveFeatures } from '../components/PayrollFeaturePanel.jsx';
-import { DollarSign, Plus, Edit2, Calculator, Trash2, Upload, FileSpreadsheet, CheckCircle2, XCircle, Search, Users, FileDown, ChevronUp, ChevronDown, ChevronsUpDown, X, Settings2, AlertTriangle, Calendar, RefreshCw, MessageSquare, FileText, Download, UserX, Link2 } from 'lucide-react';
+import PayrollFeaturePanel, { DEFAULT_FEATURES } from '../components/PayrollFeaturePanel.jsx';
+import { DollarSign, Plus, Edit2, Calculator, Trash2, Upload, FileSpreadsheet, CheckCircle2, XCircle, Search, Users, FileDown, ChevronUp, ChevronDown, ChevronsUpDown, X, Settings2, AlertTriangle, Calendar, MessageSquare, FileText, Download, UserX, Link2 } from 'lucide-react';
 import { format, parseISO, addDays, addWeeks } from 'date-fns';
-import * as XLSX from 'xlsx';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
 
 const PAID_VIA_OPTIONS = [
   { value: '', label: '— Select method —' },
@@ -50,10 +47,12 @@ export default function Payroll() {
   const [searchText, setSearchText] = useState('');
 
   // ── Feature flags ──
-  const [features, setFeatures] = useState(() => loadFeatures());
+  const [features, setFeatures] = useState(DEFAULT_FEATURES);
   const [featurePanelOpen, setFeaturePanelOpen] = useState(false);
   function toggleFeature(id) {
-    setFeatures(prev => { const next = { ...prev, [id]: !prev[id] }; saveFeatures(next); return next; });
+    const next = { ...features, [id]: !features[id] };
+    setFeatures(next);
+    api.updatePayrollPreferences({ features: next }).catch(() => load());
   }
 
   // ── Column visibility (main table) ──
@@ -71,13 +70,12 @@ export default function Payroll() {
     { key: 'projects',   label: 'Projects', group: 'Timesheet' },
   ];
   const COL_DEFAULTS = { guard: true, period: true, hours: true, rate: true, gross: true, deductions: true, net: true, paid_via: true, status: true, lic: false, projects: false };
-  const [colSettings, setColSettings] = useState(() => {
-    try { const s = JSON.parse(localStorage.getItem('payroll_col_settings') || 'null'); return s ? { ...COL_DEFAULTS, ...s } : COL_DEFAULTS; }
-    catch { return COL_DEFAULTS; }
-  });
+  const [colSettings, setColSettings] = useState(COL_DEFAULTS);
   const [colMenuOpen, setColMenuOpen] = useState(false);
   function toggleCol(key) {
-    setColSettings(prev => { const n = { ...prev, [key]: !prev[key] }; localStorage.setItem('payroll_col_settings', JSON.stringify(n)); return n; });
+    const next = { ...colSettings, [key]: !colSettings[key] };
+    setColSettings(next);
+    api.updatePayrollPreferences({ columns: next }).catch(() => load());
   }
 
   // ── Detail drawer ──
@@ -126,32 +124,33 @@ export default function Payroll() {
       setSelectedIds(new Set());
     } finally { setBulkSaving(false); }
   }
-  function bulkExportExcel() {
+  function downloadCsv(rows, fileName) {
+    if (!rows.length) return;
+    const headers = Object.keys(rows[0]);
+    const cell = value => {
+      const text = String(value ?? '');
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const csv = [headers.join(','), ...rows.map(row => headers.map(header => cell(row[header])).join(','))].join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = fileName; link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function bulkExportCsv() {
     const rows = displayedEntries.filter(e => selectedIds.has(e.id));
-    const ws = XLSX.utils.json_to_sheet(rows.map(e => ({
+    downloadCsv(rows.map(e => ({
       Guard: guardMap[e.user_id]?.full_name || '',
       Period: `${e.period_start} – ${e.period_end}`,
       Hours: e.hours_regular ?? e.hours_worked ?? 0,
       Rate: e.pay_rate ?? e.hourly_rate ?? 0,
       Gross: e.gross ?? 0, Net: e.net ?? 0, Status: e.status,
-    })));
-    XLSX.utils.book_append_sheet(XLSX.utils.book_new(), ws, 'Payroll');
-    XLSX.writeFile(XLSX.utils.book_new(), 'payroll-selection.xlsx');
+    })), 'payroll-selection.csv');
   }
 
   // ── Comments (audit trail) ──
   const [newComment, setNewComment] = useState('');
-
-  // ── Recurring schedules ──
-  const [recurringModal, setRecurringModal] = useState(false);
-  const [schedules, setSchedules] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('payroll_schedules') || '{}'); } catch { return {}; }
-  });
-  function saveSchedule(guardId, cadence) {
-    const next = { ...schedules, [guardId]: cadence };
-    setSchedules(next);
-    localStorage.setItem('payroll_schedules', JSON.stringify(next));
-  }
 
   // ── Timesheet import ──
   const [importStage, setImportStage] = useState(null); // null | 'upload' | 'preview' | 'done'
@@ -181,19 +180,25 @@ export default function Payroll() {
     { key: 'gross',      label: 'Est. Gross' },
   ];
   const TS_DEFAULTS = { guard_name: true, lic: true, status: true, shifts: true, hours: true, period: true, projects: false, rate: true, gross: true };
-  const [tsSettings, setTsSettings] = useState(() => {
-    try { const s = JSON.parse(localStorage.getItem('ts_col_settings') || 'null'); return s ? { ...TS_DEFAULTS, ...s } : TS_DEFAULTS; }
-    catch { return TS_DEFAULTS; }
-  });
+  const [tsSettings, setTsSettings] = useState(TS_DEFAULTS);
   const [tsSettingsOpen, setTsSettingsOpen] = useState(false);
   function toggleTsCol(key) {
-    setTsSettings(prev => { const n = { ...prev, [key]: !prev[key] }; localStorage.setItem('ts_col_settings', JSON.stringify(n)); return n; });
+    const next = { ...tsSettings, [key]: !tsSettings[key] };
+    setTsSettings(next);
+    api.updatePayrollPreferences({ timesheet_columns: next }).catch(() => load());
   }
 
   async function load() {
-    const [pd, gd] = await Promise.all([api.payroll(filterStatus ? `?status=${filterStatus}` : ''), api.guards()]);
+    const [pd, gd, preferences] = await Promise.all([
+      api.payroll(filterStatus ? `?status=${filterStatus}` : ''),
+      api.guards(),
+      api.payrollPreferences(),
+    ]);
     setEntries(pd.periods || pd.entries || []);
     setGuards(gd.guards || []);
+    setFeatures({ ...DEFAULT_FEATURES, ...(preferences.features || {}) });
+    setColSettings({ ...COL_DEFAULTS, ...(preferences.columns || {}) });
+    setTsSettings({ ...TS_DEFAULTS, ...(preferences.timesheet_columns || {}) });
     setLoading(false);
   }
   useEffect(() => { setLoading(true); load(); }, [filterStatus]);
@@ -447,15 +452,15 @@ export default function Payroll() {
     });
   }
 
-  function exportExcel() {
-    const rows = buildExportRows();
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Payroll');
-    XLSX.writeFile(wb, `payroll-export-${new Date().toISOString().slice(0,10)}.xlsx`);
+  function exportCsv() {
+    downloadCsv(buildExportRows(), `payroll-export-${new Date().toISOString().slice(0,10)}.csv`);
   }
 
-  function exportPDF() {
+  async function exportPDF() {
+    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+      import('jspdf'),
+      import('jspdf-autotable'),
+    ]);
     const doc = new jsPDF({ orientation: 'landscape' });
     const guardLabel = filterGuardIds.length === 0 ? 'All Guards' : filterGuardIds.map(id => guardMap[id]?.full_name || id).join(', ');
     const statusLabel = filterStatus ? filterStatus.replace(/_/g,' ') : 'All Statuses';
@@ -492,9 +497,9 @@ export default function Payroll() {
         <div className="flex items-center gap-2 flex-wrap">
           {/* Export group */}
           <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden">
-            <button onClick={exportExcel}
+            <button onClick={exportCsv}
               className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors border-r border-gray-200">
-              <FileDown size={14} className="text-gray-400" /> Excel
+              <FileDown size={14} className="text-gray-400" /> CSV
             </button>
             <button onClick={exportPDF}
               className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors">
@@ -667,7 +672,7 @@ export default function Payroll() {
                   </label>
                 ))}
                 <div className="border-t border-gray-100 pt-1 mt-1">
-                  <button onClick={() => { setColSettings(COL_DEFAULTS); localStorage.setItem('payroll_col_settings', JSON.stringify(COL_DEFAULTS)); }}
+                  <button onClick={() => { setColSettings(COL_DEFAULTS); api.updatePayrollPreferences({ columns: COL_DEFAULTS }).catch(() => load()); }}
                     className="w-full text-xs text-gray-400 hover:text-gray-700 py-1 text-center transition-colors">
                     Reset to default
                   </button>
@@ -679,12 +684,6 @@ export default function Payroll() {
 
         {/* Sort control */}
         <div className="flex items-center gap-2 ml-auto">
-          {features.recurring && (
-            <button onClick={() => setRecurringModal(true)}
-              className="flex items-center gap-1.5 text-sm border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl px-3 py-1.5 transition-colors font-medium">
-              <RefreshCw size={13} /> Schedules
-            </button>
-          )}
           <span className="text-xs text-gray-400 font-medium">Sort:</span>
           <select className="input py-1.5 text-sm w-auto pr-8"
             value={sortKey} onChange={e => setSortKey(e.target.value)}>
@@ -826,8 +825,8 @@ export default function Payroll() {
                                 <Link2 size={15} />
                               </button>
                             )}
-                            {features.paystub && (
-                              <a href={`/api/payroll/${e.id}/stub`} target="_blank" rel="noreferrer"
+                            {features.paystub && e.pay_stub_url && (
+                              <a href={e.pay_stub_url} target="_blank" rel="noreferrer"
                                 title="Download pay stub"
                                 className="text-gray-400 hover:text-blue-600 p-1.5 rounded transition-colors">
                                 <FileText size={15} />
@@ -863,7 +862,7 @@ export default function Payroll() {
             className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors disabled:opacity-50">
             Under Review
           </button>
-          <button onClick={exportExcel}
+          <button onClick={bulkExportCsv}
             className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors">
             <Download size={14} /> Export
           </button>
@@ -1461,40 +1460,6 @@ export default function Payroll() {
           </Modal>
         );
       })()}
-
-      {/* ── Recurring Schedules Modal (feature) ── */}
-      {features.recurring && recurringModal && (
-        <Modal title="Recurring Pay Schedules" onClose={() => setRecurringModal(false)} size="lg">
-          <div className="space-y-4">
-            <p className="text-sm text-gray-500">Set a pay cadence per guard. Stored locally as a reference when creating entries.</p>
-            <div className="space-y-2 max-h-80 overflow-y-auto">
-              {guards.map(g => (
-                <div key={g.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-gray-900 truncate">{g.full_name}</p>
-                    <p className="text-xs text-gray-400 truncate">{g.email}</p>
-                  </div>
-                  <select className="input py-1.5 text-sm w-44 flex-shrink-0"
-                    value={schedules[g.id] || ''}
-                    onChange={ev => saveSchedule(g.id, ev.target.value)}>
-                    <option value="">— No schedule —</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="biweekly">Biweekly</option>
-                    <option value="semimonthly">Semi-monthly</option>
-                    <option value="monthly">Monthly</option>
-                  </select>
-                  {schedules[g.id] && (
-                    <span className="text-xs bg-indigo-100 text-indigo-700 font-semibold px-2.5 py-1 rounded-full capitalize flex-shrink-0">{schedules[g.id]}</span>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div className="flex justify-end pt-2 border-t border-gray-100">
-              <button className="btn-primary" onClick={() => setRecurringModal(false)}>Done</button>
-            </div>
-          </div>
-        </Modal>
-      )}
 
       {/* ── Feature Panel ── */}
       {featurePanelOpen && (

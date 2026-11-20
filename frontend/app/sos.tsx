@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import {
   View, Text, StyleSheet, Pressable, TextInput,
   Animated, Vibration, Platform, ScrollView, ActivityIndicator,
@@ -17,7 +17,7 @@ export default function SOSScreen() {
   const [phase, setPhase] = useState<Phase>("standby");
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const [pulseAnim] = useState(() => new Animated.Value(1));
 
   useEffect(() => {
     const pulse = Animated.loop(

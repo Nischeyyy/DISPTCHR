@@ -166,7 +166,7 @@ export default function NotificationsScreen() {
             <Ionicons name="notifications-off-outline" size={56} color={C.textTertiary} />
             <Text style={s.emptyTitle}>No notifications</Text>
             <Text style={s.emptyHint}>
-              You'll see shift updates, payroll alerts, and announcements here.
+              You’ll see shift updates, payroll alerts, and announcements here.
             </Text>
           </View>
         }

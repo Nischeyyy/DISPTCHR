@@ -1,23 +1,17 @@
 const BASE = '/api';
 
-function getToken() {
-  return localStorage.getItem('mgr_token');
-}
-
 async function request(method, path, body, formData) {
   const headers = {};
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
   if (body && !formData) headers['Content-Type'] = 'application/json';
 
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
+    credentials: 'include',
     body: formData ? formData : body ? JSON.stringify(body) : undefined,
   });
 
-  if (res.status === 401 && path !== '/auth/login') {
-    localStorage.removeItem('mgr_token');
+  if (res.status === 401 && path !== '/auth/login' && path !== '/auth/manager-login') {
     localStorage.removeItem('mgr_user');
     window.location.href = '/manager';
     return;
@@ -34,10 +28,12 @@ export const api = {
   get: (path) => request('GET', path),
   post: (path, body) => request('POST', path, body),
   put: (path, body) => request('PUT', path, body),
+  patch: (path, body) => request('PATCH', path, body),
   del: (path) => request('DELETE', path),
 
   // Auth
-  login: (email, password) => request('POST', '/auth/login', { email, password }),
+  login: (email, password, mfaCode) => request('POST', '/auth/manager-login', { email, password, mfa_code: mfaCode }),
+  logout: () => request('POST', '/auth/logout'),
   me: () => request('GET', '/auth/me'),
 
   // Dashboard
@@ -48,6 +44,7 @@ export const api = {
   guard: (id) => request('GET', `/admin/guards/${id}`),
   createGuard: (body) => request('POST', '/admin/guards', body),
   updateGuard: (id, body) => request('PUT', `/admin/guards/${id}`, body),
+  verifyEmployeeBadge: (token) => request('POST', '/admin/employee-badge/verify', { token }),
 
   // Sites
   sites: () => request('GET', '/admin/sites'),
@@ -95,6 +92,8 @@ export const api = {
   deletePayroll: (id) => request('DELETE', `/admin/payroll/${id}`),
   bulkDeletePayroll: (ids) => Promise.all(ids.map(id => request('DELETE', `/admin/payroll/${id}`))),
   payrollStub: (id) => request('GET', `/payroll/${id}/stub`),
+  payrollPreferences: () => request('GET', '/admin/preferences/payroll'),
+  updatePayrollPreferences: (body) => request('PATCH', '/admin/preferences/payroll', body),
 
   // Announcements
   announcements: () => request('GET', '/admin/announcements'),

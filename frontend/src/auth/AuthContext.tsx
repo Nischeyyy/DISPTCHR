@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import { api, setToken, getToken, setUnauthorizedHandler } from '../api/client';
+import { api, setSession, getToken, revokeSession, setUnauthorizedHandler } from '../api/client';
 
 type User = {
   id: string;
@@ -24,7 +24,6 @@ type AuthCtx = {
   sessionExpired: boolean;
   clearSessionExpired: () => void;
   login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, full_name: string, phone?: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 };
@@ -40,19 +39,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refresh = useCallback(async () => {
     try {
-      console.log('[AUTH] refresh start');
       const token = await getToken();
-      console.log('[AUTH] token?', !!token);
       if (!token) {
         setUser(null);
         return;
       }
       const u = await api<User>('/auth/me', { skipUnauthorizedHandler: true });
-      console.log('[AUTH] me ok', u?.email);
       setUser(u);
-    } catch (e) {
-      console.log('[AUTH] refresh error', String(e));
-      await setToken(null);
+    } catch {
+      await setSession(null, null);
       setUser(null);
     }
   }, []);
@@ -66,7 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Only show "session expired" if the user was actually authenticated — not on bootstrap 401s.
   useEffect(() => {
     setUnauthorizedHandler(async () => {
-      await setToken(null);
+      await setSession(null, null);
       setUser(null);
       if (wasAuthenticated.current) setSessionExpired(true);
       wasAuthenticated.current = false;
@@ -75,42 +70,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     (async () => {
-      console.log('[AUTH] mount effect - calling refresh');
       await refresh();
-      console.log('[AUTH] mount effect - setLoading false');
       setLoading(false);
     })();
   }, [refresh]);
 
   const login = async (email: string, password: string) => {
-    const r = await api<{ access_token: string; user: User }>('/auth/login', {
+    const r = await api<{ access_token: string; refresh_token?: string; user: User }>('/auth/login', {
       method: 'POST',
       body: { email, password },
       auth: false,
     });
-    await setToken(r.access_token);
-    setUser(r.user);
-    setSessionExpired(false);
-  };
-
-  const register = async (
-    email: string,
-    password: string,
-    full_name: string,
-    phone?: string
-  ) => {
-    const r = await api<{ access_token: string; user: User }>('/auth/register', {
-      method: 'POST',
-      body: { email, password, full_name, phone },
-      auth: false,
-    });
-    await setToken(r.access_token);
+    await setSession(r.access_token, r.refresh_token || null);
+    if (r.user.role === 'admin') {
+      await setSession(null, null);
+      throw new Error('Manager accounts sign in through the Manager Portal.');
+    }
     setUser(r.user);
     setSessionExpired(false);
   };
 
   const logout = async () => {
-    await setToken(null);
+    await revokeSession();
     setUser(null);
   };
 
@@ -118,7 +99,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ user, loading, sessionExpired, clearSessionExpired, login, register, logout, refresh }}
+      value={{ user, loading, sessionExpired, clearSessionExpired, login, logout, refresh }}
     >
       {children}
     </Ctx.Provider>

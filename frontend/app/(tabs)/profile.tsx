@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable,
   ActivityIndicator, Linking, Animated,
@@ -6,10 +6,9 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { Avatar, StatusPill } from "@/src/ui";
+import { Avatar } from "@/src/ui";
 import { api } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
-import { DeadButton } from "@/src/components/DeadButton";
 
 // ─── Light palette (matches Schedule / reference design) ───────────────────
 const C = {
@@ -34,7 +33,7 @@ const ACTIONS = [
 ];
 
 function ActionCell({ item, onPress, isLast }: { item: typeof ACTIONS[0]; onPress: () => void; isLast: boolean }) {
-  const scale = useRef(new Animated.Value(1)).current;
+  const [scale] = useState(() => new Animated.Value(1));
   return (
     <Animated.View style={[s.actionCellWrap, { transform: [{ scale }] }]}>
       <Pressable
@@ -89,10 +88,8 @@ export default function Profile() {
       <View style={s.navbar}>
         <Text style={s.navTitle}>Profile</Text>
         <View style={s.navIcons}>
-          <Pressable hitSlop={10} style={s.navIconBtn}>
-            <DeadButton>
-              <Ionicons name="notifications-outline" size={22} color={C.text} />
-            </DeadButton>
+          <Pressable hitSlop={10} style={s.navIconBtn} onPress={() => router.push("/(tabs)/notifications")}>
+            <Ionicons name="notifications-outline" size={22} color={C.text} />
           </Pressable>
           <Pressable hitSlop={10} style={s.navIconBtn} onPress={() => router.push("/settings")}>
             <Ionicons name="settings-outline" size={22} color={C.text} />

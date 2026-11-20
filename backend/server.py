@@ -7,33 +7,41 @@ import os
 import hmac
 import uuid
 import json
+import base64
+import hashlib
 import logging
 import secrets
 import mimetypes
+import time
+import struct
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from datetime import datetime, timedelta, timezone, date
 from typing import Optional, List, Annotated, Literal
 from contextlib import asynccontextmanager
 
 import jwt
 import bcrypt
-import httpx
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from cryptography.fernet import Fernet
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Request, Response, UploadFile, File, Form
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr, Field
+from pymongo import ReturnDocument
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError  # noqa: F401
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas as pdf_canvas
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+import sentry_sdk
 import notifications as notif
+from object_storage import ObjectStorage
+from jobs import enqueue as enqueue_job
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -54,18 +62,45 @@ MONGO_URL = _require_env("MONGO_URL")
 DB_NAME = _require_env("DB_NAME")
 JWT_SECRET = _require_env("JWT_SECRET")
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
-JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
-EMERGENT_PUSH_KEY = os.environ.get("EMERGENT_PUSH_KEY", "placeholder")
+ACCESS_TOKEN_MINUTES = int(os.environ.get("ACCESS_TOKEN_MINUTES", "15"))
+MANAGER_SESSION_HOURS = int(os.environ.get("MANAGER_SESSION_HOURS", "8"))
+REFRESH_TOKEN_DAYS = int(os.environ.get("REFRESH_TOKEN_DAYS", "30"))
+APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
+IS_PRODUCTION = APP_ENV == "production"
+ALLOW_PUBLIC_REGISTRATION = os.environ.get("ALLOW_PUBLIC_REGISTRATION", "false").strip().lower() == "true"
+SESSION_COOKIE_NAME = os.environ.get(
+    "SESSION_COOKIE_NAME",
+    "__Host-disptchr_session" if IS_PRODUCTION else "disptchr_session",
+)
+SESSION_COOKIE_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "true" if IS_PRODUCTION else "false").strip().lower() == "true"
+CORS_ORIGINS = [origin.strip() for origin in os.environ.get(
+    "CORS_ORIGINS",
+    "http://127.0.0.1:5050,http://localhost:5050,http://127.0.0.1:3000,http://localhost:3000",
+).split(",") if origin.strip()]
+RATE_LIMIT_STORAGE_URI = os.environ.get("RATE_LIMIT_STORAGE_URI", "memory://").strip()
+if IS_PRODUCTION and RATE_LIMIT_STORAGE_URI == "memory://":
+    raise RuntimeError("RATE_LIMIT_STORAGE_URI must use shared Redis storage in production")
 CONTROL_PANEL_API_KEY = os.environ.get("CONTROL_PANEL_API_KEY", "")
-PUSH_BASE_URL = "https://integrations.emergentagent.com"
-# The external push provider requires a real key; without one, skip the network
-# call entirely instead of generating a 401 for every notification attempt.
-PUSH_ENABLED = bool(EMERGENT_PUSH_KEY) and EMERGENT_PUSH_KEY != "placeholder"
+METRICS_TOKEN = os.environ.get("METRICS_TOKEN", "").strip()
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "").strip()
+
+_configured_pii_key = os.environ.get("PII_ENCRYPTION_KEY", "").strip()
+if IS_PRODUCTION and not _configured_pii_key:
+    raise RuntimeError("Required environment variable 'PII_ENCRYPTION_KEY' is not set in production")
+if not _configured_pii_key:
+    _configured_pii_key = base64.urlsafe_b64encode(
+        hashlib.sha256(f"{JWT_SECRET}:local-pii".encode()).digest()
+    ).decode()
+try:
+    pii_cipher = Fernet(_configured_pii_key.encode())
+except (TypeError, ValueError) as exc:
+    raise RuntimeError("PII_ENCRYPTION_KEY must be a valid Fernet key") from exc
 
 UPLOAD_DIR = ROOT_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 (UPLOAD_DIR / "paystubs").mkdir(exist_ok=True)
 (UPLOAD_DIR / "attachments").mkdir(exist_ok=True)
+storage = ObjectStorage(UPLOAD_DIR, IS_PRODUCTION)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_UPLOAD_TYPES = {
     "image/jpeg", "image/png", "image/webp", "image/heic",
@@ -73,6 +108,49 @@ ALLOWED_UPLOAD_TYPES = {
 }
 
 RESET_TOKEN_TTL_MINUTES = 30
+
+if SENTRY_DSN:
+    sentry_sdk.init(dsn=SENTRY_DSN, environment=APP_ENV, traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1")))
+
+if IS_PRODUCTION:
+    if len(JWT_SECRET) < 32:
+        raise RuntimeError("JWT_SECRET must contain at least 32 characters in production")
+    for required_key in (
+        "CONTROL_PANEL_API_KEY", "METRICS_TOKEN", "SENDGRID_API_KEY", "SENDGRID_FROM_EMAIL",
+        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
+    ):
+        _require_env(required_key)
+    if not CORS_ORIGINS or any("localhost" in origin or "127.0.0.1" in origin for origin in CORS_ORIGINS):
+        raise RuntimeError("CORS_ORIGINS must contain only production HTTPS origins in production")
+    if any(not origin.startswith("https://") for origin in CORS_ORIGINS):
+        raise RuntimeError("Every production CORS origin must use HTTPS")
+
+HTTP_REQUESTS = Counter("disptchr_http_requests_total", "HTTP requests", ["method", "route", "status"])
+HTTP_LATENCY = Histogram("disptchr_http_request_duration_seconds", "HTTP request duration", ["method", "route"])
+
+SENSITIVE_USER_PROJECTION = {
+    "_id": 0,
+    "hashed_password": 0,
+    "sin": 0,
+    "sin_encrypted": 0,
+    "direct_deposit": 0,
+    "direct_deposit_encrypted": 0,
+    "mfa_secret_encrypted": 0,
+    "mfa_recovery_hashes": 0,
+    "mfa_last_step": 0,
+}
+
+
+def safe_user_document(user: dict) -> dict:
+    safe = dict(user)
+    safe.pop("_id", None)
+    for field in SENSITIVE_USER_PROJECTION:
+        safe.pop(field, None)
+    return safe
+
+
+def encrypt_private_value(value: str) -> str:
+    return pii_cipher.encrypt(value.encode("utf-8")).decode("ascii")
 
 class _JSONFormatter(logging.Formatter):
     """Emit one JSON object per log line for easy machine parsing."""
@@ -114,14 +192,11 @@ client = AsyncIOMotorClient(
 db = client[DB_NAME]
 
 # Rate limiter — shared across all routes
-limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
-
-push_client = httpx.AsyncClient(
-    base_url=PUSH_BASE_URL,
-    headers={"X-Push-Key": EMERGENT_PUSH_KEY},
-    timeout=10.0,
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["300/minute"],
+    storage_uri=RATE_LIMIT_STORAGE_URI,
 )
-
 
 # ============================================================
 # Utilities
@@ -137,25 +212,101 @@ def iso(dt: datetime) -> str:
 
 
 def hash_password(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+    normalized = hashlib.sha256(pw.encode("utf-8")).hexdigest().encode("ascii")
+    return "bcrypt-sha256$" + bcrypt.hashpw(normalized, bcrypt.gensalt()).decode()
 
 
 def verify_password(pw: str, hashed: str) -> bool:
     try:
-        return bcrypt.checkpw(pw.encode(), hashed.encode())
+        if hashed.startswith("bcrypt-sha256$"):
+            normalized = hashlib.sha256(pw.encode("utf-8")).hexdigest().encode("ascii")
+            return bcrypt.checkpw(normalized, hashed.removeprefix("bcrypt-sha256$").encode())
+        return bcrypt.checkpw(pw.encode("utf-8"), hashed.encode())
     except Exception:
         return False
 
 
-def create_access_token(user_id: str, email: str, role: str) -> str:
+def create_access_token(
+    user_id: str,
+    email: str,
+    role: str,
+    expires_minutes: Optional[int] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    ttl = expires_minutes if expires_minutes is not None else ACCESS_TOKEN_MINUTES
     payload = {
         "sub": user_id,
         "email": email,
         "role": role,
-        "exp": now_utc() + timedelta(hours=JWT_EXPIRE_HOURS),
+        "typ": "access",
+        "exp": now_utc() + timedelta(minutes=ttl),
         "iat": now_utc(),
     }
+    if session_id:
+        payload["jti"] = session_id
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _totp_code(secret: str, step: int) -> str:
+    key = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
+    digest = hmac.new(key, struct.pack(">Q", step), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+    return f"{number:06d}"
+
+
+def _manager_mfa_setup(email: str) -> tuple[dict, dict]:
+    secret = base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    recovery_codes = [f"{''.join(secrets.choice(alphabet) for _ in range(4))}-{''.join(secrets.choice(alphabet) for _ in range(4))}" for _ in range(10)]
+    stored = {
+        "mfa_secret_encrypted": encrypt_private_value(secret),
+        "mfa_recovery_hashes": [hashlib.sha256(code.encode()).hexdigest() for code in recovery_codes],
+        "mfa_last_step": None,
+        "mfa_enabled": True,
+    }
+    uri = f"otpauth://totp/{quote(f'Skyhawk Manager:{email}')}?secret={secret}&issuer={quote('Skyhawk Security')}&algorithm=SHA1&digits=6&period=30"
+    return stored, {"secret": secret, "otpauth_uri": uri, "recovery_codes": recovery_codes}
+
+
+async def verify_manager_mfa(user: dict, submitted: Optional[str]) -> bool:
+    if not user.get("mfa_enabled") or not user.get("mfa_secret_encrypted") or not submitted:
+        return False
+    code = submitted.strip().upper()
+    if re.fullmatch(r"\d{6}", code):
+        secret = pii_cipher.decrypt(user["mfa_secret_encrypted"].encode()).decode()
+        current_step = int(time.time() // 30)
+        for step in (current_step - 1, current_step, current_step + 1):
+            if hmac.compare_digest(_totp_code(secret, step), code):
+                result = await db.users.update_one(
+                    {"id": user["id"], "$or": [{"mfa_last_step": {"$lt": step}}, {"mfa_last_step": None}, {"mfa_last_step": {"$exists": False}}]},
+                    {"$set": {"mfa_last_step": step}},
+                )
+                return result.modified_count == 1
+        return False
+    candidate = hashlib.sha256(code.encode()).hexdigest()
+    match = next((value for value in user.get("mfa_recovery_hashes", []) if hmac.compare_digest(value, candidate)), None)
+    if not match:
+        return False
+    result = await db.users.update_one({"id": user["id"], "mfa_recovery_hashes": match}, {"$pull": {"mfa_recovery_hashes": match}})
+    return result.modified_count == 1
+
+
+def refresh_token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+async def create_refresh_token(user_id: str, family_id: Optional[str] = None) -> str:
+    raw = secrets.token_urlsafe(48)
+    await db.refresh_tokens.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "family_id": family_id or str(uuid.uuid4()),
+        "token_digest": refresh_token_digest(raw),
+        "expires_at": now_utc() + timedelta(days=REFRESH_TOKEN_DAYS),
+        "created_at": iso(now_utc()),
+    })
+    return raw
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -206,6 +357,7 @@ def required_manager_permission(path: str) -> Optional[str]:
     normalized = path.removeprefix("/api")
     permission_routes = (
         ("/admin/dashboard", "dashboard.view"),
+        ("/admin/employee-badge", "guards.manage"),
         ("/admin/guards", "guards.manage"),
         ("/admin/sites", "sites.manage"),
         ("/admin/shifts", "scheduling.manage"),
@@ -214,6 +366,7 @@ def required_manager_permission(path: str) -> Optional[str]:
         ("/admin/timeclock", "timeclock.manage"),
         ("/admin/incidents", "incidents.manage"),
         ("/incidents", "incidents.manage"),
+        ("/admin/preferences/payroll", "payroll.manage"),
         ("/admin/payroll", "payroll.manage"),
         ("/payroll", "payroll.manage"),
         ("/admin/announcements", "announcements.manage"),
@@ -228,11 +381,18 @@ def required_manager_permission(path: str) -> Optional[str]:
     return None
 
 
-async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
-    if not creds:
+async def get_current_user(request: Request, creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
+    token = creds.credentials if creds else request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
+    return await _user_from_access_token(token)
+
+
+async def _user_from_access_token(token: str) -> dict:
     try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("typ") != "access":
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
@@ -241,11 +401,22 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
     except jwt.PyJWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
 
-    user = await db.users.find_one({"id": user_id}, {"_id": 0, "hashed_password": 0})
+    user = await db.users.find_one({"id": user_id}, SENSITIVE_USER_PROJECTION)
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
     if user.get("access_status", "active") != "active":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account access is disabled")
+    if user.get("role") == "admin":
+        session_id = payload.get("jti")
+        if not session_id:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Manager session is invalid")
+        session = await db.manager_sessions.find_one({
+            "id": session_id,
+            "user_id": user["id"],
+            "expires_at": {"$gte": now_utc()},
+        }, {"_id": 0, "id": 1})
+        if not session:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Manager session has expired or was revoked")
     return user
 
 
@@ -254,19 +425,20 @@ async def send_push(recipients: list[str], data: dict, idempotency_key: Optional
         return
     if "title" not in data or "message" not in data:
         return
-    if not PUSH_ENABLED:
-        # No real push provider key configured — this is expected in dev/demo
-        # environments. Avoid spamming logs with a 401 per notification.
-        return
     payload = {"recipients": recipients, "data": data}
     if idempotency_key:
         payload["$idempotency_key"] = idempotency_key
-    try:
-        resp = await push_client.post("/api/v1/push/trigger", json=payload)
-        if resp.status_code >= 400:
-            logger.warning(f"Push failed: {resp.status_code} {resp.text}")
-    except Exception as e:
-        logger.warning(f"Push notification failed (non-blocking): {e}")
+    await enqueue_job(db, "push", payload, idempotency_key)
+
+
+async def queue_email(to: str, subject: str, html: str, text: str = "", idempotency_key: Optional[str] = None):
+    if to:
+        await enqueue_job(db, "email", {"to": to, "subject": subject, "html": html, "text": text}, idempotency_key)
+
+
+async def queue_sms(to: str, body: str, idempotency_key: Optional[str] = None):
+    if to:
+        await enqueue_job(db, "sms", {"to": to, "body": body}, idempotency_key)
 
 
 # ============================================================
@@ -274,7 +446,7 @@ async def send_push(recipients: list[str], data: dict, idempotency_key: Optional
 # ============================================================
 class RegisterIn(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=12, max_length=128)
     full_name: str
     phone: Optional[str] = None
 
@@ -282,25 +454,38 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+    mfa_code: Optional[str] = Field(default=None, min_length=6, max_length=32)
 
 
 class AuthOut(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
     user: dict
 
 
+class ManagerAuthOut(BaseModel):
+    user: dict
+
+
+class RefreshTokenIn(BaseModel):
+    refresh_token: str = Field(min_length=32, max_length=500)
+
+
+class BadgeVerifyIn(BaseModel):
+    token: str = Field(min_length=20, max_length=2000)
+
+
 class ClockInIn(BaseModel):
-    shift_id: Optional[str] = None
-    latitude: float
-    longitude: float
-    selfie_base64: str
-    site_id: Optional[str] = None
+    shift_id: str = Field(min_length=1, max_length=100)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    selfie_base64: str = Field(min_length=100, max_length=500_000)
 
 
 class ClockOutIn(BaseModel):
-    latitude: float
-    longitude: float
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
     selfie_base64: Optional[str] = None
 
 
@@ -326,9 +511,9 @@ class IncidentIn(BaseModel):
 
 
 class RegisterPushIn(BaseModel):
-    user_id: str
-    platform: str
-    device_token: str
+    user_id: Optional[str] = None
+    platform: Literal["ios", "android"]
+    device_token: str = Field(min_length=20, max_length=300)
 
 
 class ClaimShiftIn(BaseModel):
@@ -401,7 +586,7 @@ class CommunityEditIn(BaseModel):
 
 class ChangePasswordIn(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=12, max_length=128)
 
 
 class ForgotPasswordIn(BaseModel):
@@ -410,7 +595,7 @@ class ForgotPasswordIn(BaseModel):
 
 class ResetPasswordIn(BaseModel):
     token: str
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=12, max_length=128)
 
 
 class SettingsIn(BaseModel):
@@ -418,6 +603,12 @@ class SettingsIn(BaseModel):
     location_sharing: Optional[bool] = None
     shift_reminders: Optional[bool] = None
     community_notifications: Optional[bool] = None
+
+
+class ManagerPayrollPreferencesIn(BaseModel):
+    features: Optional[dict[str, bool]] = None
+    columns: Optional[dict[str, bool]] = None
+    timesheet_columns: Optional[dict[str, bool]] = None
 
 
 class OnboardingDocIn(BaseModel):
@@ -457,20 +648,53 @@ async def lifespan(app: FastAPI):
         await ensure_indexes()
         logger.info("Database indexes ensured")
     except Exception as exc:
-        logger.error("Failed to create DB indexes — check MONGO_URL: %s", exc)
+        logger.critical("Failed to create required DB indexes: %s", exc)
+        raise
     notif.log_status()
-    try:
-        await seed_data()
-    except Exception as exc:
-        logger.error("Failed to seed demo data: %s", exc)
     yield
     client.close()
-    await push_client.aclose()
 
 
-app = FastAPI(title="Skyhawk Ops API", lifespan=lifespan)
+app = FastAPI(
+    title="Skyhawk Ops API",
+    lifespan=lifespan,
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None,
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", "")[:100] or str(uuid.uuid4())
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    response = await call_next(request)
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", request.url.path)
+    HTTP_REQUESTS.labels(request.method, route_path, str(response.status_code)).inc()
+    HTTP_LATENCY.labels(request.method, route_path).observe(time.perf_counter() - started)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.middleware("http")
+async def enforce_cookie_request_origin(request: Request, call_next):
+    """Block cross-site mutations when authentication comes from a browser cookie."""
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.cookies.get(SESSION_COOKIE_NAME)
+        and not request.headers.get("authorization")
+    ):
+        origin = request.headers.get("origin")
+        if origin not in CORS_ORIGINS:
+            return JSONResponse(status_code=403, content={"detail": "Untrusted request origin"})
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.exception_handler(Exception)
@@ -493,15 +717,28 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 api = APIRouter(prefix="/api")
 
 
+@app.get("/internal/metrics", include_in_schema=False)
+async def metrics(request: Request):
+    if not METRICS_TOKEN or not hmac.compare_digest(request.headers.get("x-metrics-token", ""), METRICS_TOKEN):
+        raise HTTPException(404, "Not found")
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/internal/live", include_in_schema=False)
+async def live():
+    return {"status": "ok"}
+
+
 @api.get("/health")
 async def health():
-    """Liveness + readiness probe. Returns 503 if MongoDB is unreachable."""
+    """Readiness probe. Returns 503 if a required dependency is unreachable."""
     try:
         await db.command("ping")
-        return {"status": "ok", "database": "connected"}
+        await storage.healthcheck()
+        return {"status": "ok", "dependencies": "connected"}
     except Exception as exc:
         logger.warning("Health check failed: %s", exc)
-        raise HTTPException(status_code=503, detail="Database unavailable")
+        raise HTTPException(status_code=503, detail="Required dependency unavailable")
 
 
 async def ensure_indexes():
@@ -515,6 +752,12 @@ async def ensure_indexes():
     await db.timeclock.create_index("id", unique=True)
     await db.payroll.create_index("id", unique=True)
     await db.push_tokens.create_index([("user_id", 1), ("device_token", 1)], unique=True)
+    await db.refresh_tokens.create_index("token_digest", unique=True)
+    await db.refresh_tokens.create_index("expires_at", expireAfterSeconds=0)
+    await db.refresh_tokens.create_index([("user_id", 1), ("family_id", 1)])
+    await db.manager_sessions.create_index("id", unique=True)
+    await db.manager_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await db.manager_sessions.create_index([("user_id", 1), ("created_at", -1)])
     await db.sos_alerts.create_index("id", unique=True)
     await db.sos_alerts.create_index([("status", 1), ("created_at", -1)])
     await db.shift_swaps.create_index("id", unique=True)
@@ -523,8 +766,17 @@ async def ensure_indexes():
     await db.community_posts.create_index("id", unique=True)
     await db.community_posts.create_index([("type", 1), ("created_at", -1)])
     await db.password_resets.create_index("user_id", unique=True)
+    await db.password_resets.create_index("token_digest", unique=True, sparse=True)
+    await db.password_resets.delete_many({"expires_at": {"$type": "string"}})
+    await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.access_audit.create_index([("occurred_at", -1)])
+    await db.stored_files.create_index([("category", 1), ("stored_name", 1)], unique=True)
+    await db.stored_files.create_index([("owner_id", 1), ("created_at", -1)])
+    await db.notification_jobs.create_index("id", unique=True)
+    await db.notification_jobs.create_index("idempotency_key", unique=True, sparse=True)
+    await db.notification_jobs.create_index([("status", 1), ("available_at", 1), ("created_at", 1)])
+    await db.notification_jobs.create_index("purge_at", expireAfterSeconds=0, sparse=True)
     await db.notifications.create_index([("user_id", 1), ("read", 1)])
     # One-time compatibility backfill. Once present, missing permission fields
     # are treated as no access rather than silently granting future routes.
@@ -536,267 +788,43 @@ async def ensure_indexes():
         {"role": "admin", "manager_permissions": {"$exists": False}},
         {"$set": {"manager_permissions": sorted(MANAGER_PERMISSION_KEYS)}},
     )
+    await migrate_protected_file_urls()
 
 
-# ============================================================
-# Seed demo data
-# ============================================================
-async def seed_data():
-    # Idempotent seed
-    if await db.users.count_documents({}) > 0:
-        return
-    logger.info("Seeding demo data...")
+async def migrate_protected_file_urls():
+    """Move legacy public upload paths to the authenticated file endpoint."""
+    await db.payroll.update_many(
+        {"pay_stub_url": {"$regex": r"^/uploads/paystubs/"}},
+        [{"$set": {"pay_stub_url": {"$replaceOne": {
+            "input": "$pay_stub_url",
+            "find": "/uploads/paystubs/",
+            "replacement": "/api/files/paystubs/",
+        }}}}],
+    )
+    await db.wallet_documents.update_many(
+        {"attachment_url": {"$regex": r"^/uploads/attachments/"}},
+        [{"$set": {"attachment_url": {"$replaceOne": {
+            "input": "$attachment_url",
+            "find": "/uploads/attachments/",
+            "replacement": "/api/files/attachments/",
+        }}}}],
+    )
+    await db.community_posts.update_many(
+        {"attachments.url": {"$regex": r"^/uploads/attachments/"}},
+        [{"$set": {"attachments": {"$map": {
+            "input": {"$ifNull": ["$attachments", []]},
+            "as": "attachment",
+            "in": {"$mergeObjects": ["$$attachment", {
+                "url": {"$replaceOne": {
+                    "input": "$$attachment.url",
+                    "find": "/uploads/attachments/",
+                    "replacement": "/api/files/attachments/",
+                }}
+            }]},
+        }}}}],
+    )
 
-    admin_id = str(uuid.uuid4())
-    guard_id = str(uuid.uuid4())
-    guard2_id = str(uuid.uuid4())
 
-    await db.users.insert_many([
-        {
-            "id": admin_id,
-            "email": "admin@skyhawk.com",
-            "hashed_password": hash_password("Admin123"),
-            "full_name": "Admin Steele",
-            "phone": "+1 416 555 0000",
-            "role": "admin",
-            "access_status": "active",
-            "manager_permissions": sorted(MANAGER_PERMISSION_KEYS),
-            "employee_number": "SH-0001",
-            "licence_number": "SG-ADM-2026",
-            "licence_expiry": iso(now_utc() + timedelta(days=400)),
-            "certifications": ["First Aid", "Smart Serve", "WHMIS", "CPR"],
-            "employment_status": "Active - Full Time",
-            "photo_url": "https://images.unsplash.com/photo-1547882230-87a3d4390e8d",
-            "emergency_contact": {"name": "Sara Steele", "phone": "+1 416 555 0111", "relation": "Spouse"},
-            "onboarding_complete": True,
-            "created_at": iso(now_utc()),
-        },
-        {
-            "id": guard_id,
-            "email": "guard@skyhawk.com",
-            "hashed_password": hash_password("Password123"),
-            "full_name": "Marcus Vance",
-            "phone": "+1 416 555 0142",
-            "role": "employee",
-            "access_status": "active",
-            "employee_number": "SH-2041",
-            "licence_number": "SG-ON-89442",
-            "licence_expiry": iso(now_utc() + timedelta(days=42)),
-            "certifications": ["First Aid", "WHMIS", "Smart Serve"],
-            "employment_status": "Active - Full Time",
-            "photo_url": "https://images.unsplash.com/photo-1547882230-87a3d4390e8d",
-            "emergency_contact": {"name": "Elena Vance", "phone": "+1 416 555 0999", "relation": "Sister"},
-            "onboarding_complete": True,
-            "created_at": iso(now_utc()),
-        },
-        {
-            "id": guard2_id,
-            "email": "guard2@skyhawk.com",
-            "hashed_password": hash_password("Password123"),
-            "full_name": "Priya Kaur",
-            "phone": "+1 647 555 0212",
-            "role": "employee",
-            "access_status": "active",
-            "employee_number": "SH-2088",
-            "licence_number": "SG-ON-91201",
-            "licence_expiry": iso(now_utc() + timedelta(days=180)),
-            "certifications": ["First Aid", "CPR"],
-            "employment_status": "Active - Part Time",
-            "photo_url": "https://images.unsplash.com/photo-1544005313-94ddf0286df2",
-            "emergency_contact": {"name": "Ravi Kaur", "phone": "+1 647 555 0111", "relation": "Father"},
-            "onboarding_complete": False,
-            "created_at": iso(now_utc()),
-        },
-    ])
-
-    # Sites
-    site_ids = [str(uuid.uuid4()) for _ in range(4)]
-    sites = [
-        {
-            "id": site_ids[0], "name": "Toronto Financial Tower",
-            "address": "88 Bay Street, Toronto, ON M5J 2S1",
-            "latitude": 43.6467, "longitude": -79.3785,
-            "supervisor": "Derek Cole", "supervisor_phone": "+1 416 555 0301",
-            "instructions": "Report to lobby desk. Uniform inspection required. Rounds every 30 minutes. Log all entries in the electronic register. No mobile use on patrol.",
-            "geofence_radius_m": 150,
-        },
-        {
-            "id": site_ids[1], "name": "Skyline Convention Centre",
-            "address": "255 Front Street West, Toronto, ON M5V 2W6",
-            "latitude": 43.6427, "longitude": -79.3860,
-            "supervisor": "Alicia Ng", "supervisor_phone": "+1 416 555 0342",
-            "instructions": "Enter via service entrance C. Check credentials at all main doors. Escalate any suspicious packages immediately to supervisor.",
-            "geofence_radius_m": 200,
-        },
-        {
-            "id": site_ids[2], "name": "Northlake Warehouse",
-            "address": "1200 Pharmacy Ave, Scarborough, ON M1P 2M3",
-            "latitude": 43.7691, "longitude": -79.2966,
-            "supervisor": "Jamal Reeves", "supervisor_phone": "+1 416 555 0555",
-            "instructions": "K9 unit on-site nights. Loading bay 4 requires escort access. Motion sensors monitored — reset via panel in office 2B.",
-            "geofence_radius_m": 250,
-        },
-        {
-            "id": site_ids[3], "name": "Harbourfront Residences",
-            "address": "10 Queens Quay West, Toronto, ON M5J 2R9",
-            "latitude": 43.6389, "longitude": -79.3806,
-            "supervisor": "Fiona Marsh", "supervisor_phone": "+1 416 555 0212",
-            "instructions": "Concierge relief 22:00 - 06:00. Verify all guest passes. Escalate noise complaints to property manager.",
-            "geofence_radius_m": 120,
-        },
-    ]
-    await db.sites.insert_many(sites)
-
-    # Today's active shift for guard
-    today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow = today + timedelta(days=1)
-    shift_start = today.replace(hour=18, minute=0)
-    shift_end = today.replace(hour=23, minute=59) + timedelta(hours=2)  # ends 02:00 next day
-
-    scheduled_shifts = []
-    # Today's shift (active/upcoming)
-    scheduled_shifts.append({
-        "id": str(uuid.uuid4()), "user_id": guard_id, "site_id": site_ids[0],
-        "start": iso(shift_start), "end": iso(shift_end),
-        "role": "Concierge Security", "pay_rate": 24.50, "status": "scheduled",
-        "instructions_acknowledged": False,
-    })
-    # Tomorrow
-    scheduled_shifts.append({
-        "id": str(uuid.uuid4()), "user_id": guard_id, "site_id": site_ids[1],
-        "start": iso(tomorrow.replace(hour=22)), "end": iso(tomorrow.replace(hour=23, minute=59) + timedelta(hours=6, minutes=1)),
-        "role": "Event Security", "pay_rate": 26.00, "status": "scheduled",
-        "instructions_acknowledged": True,
-    })
-    # This week upcoming
-    for i in range(2, 6):
-        d = today + timedelta(days=i)
-        scheduled_shifts.append({
-            "id": str(uuid.uuid4()), "user_id": guard_id, "site_id": site_ids[i % 4],
-            "start": iso(d.replace(hour=18)),
-            "end": iso(d.replace(hour=23, minute=59) + timedelta(hours=2, minutes=1)),
-            "role": "Patrol", "pay_rate": 24.50, "status": "scheduled",
-            "instructions_acknowledged": False,
-        })
-    # Past week completed
-    for i in range(1, 6):
-        d = today - timedelta(days=i)
-        scheduled_shifts.append({
-            "id": str(uuid.uuid4()), "user_id": guard_id, "site_id": site_ids[i % 4],
-            "start": iso(d.replace(hour=18)),
-            "end": iso(d.replace(hour=23, minute=59) + timedelta(hours=2, minutes=1)),
-            "role": "Patrol", "pay_rate": 24.50, "status": "completed",
-            "hours_worked": 8.0, "instructions_acknowledged": True,
-        })
-    await db.shifts.insert_many(scheduled_shifts)
-
-    # Open shifts marketplace
-    open_shifts = []
-    for i, offset in enumerate([1, 2, 3, 4, 5, 6, 7]):
-        d = today + timedelta(days=offset)
-        open_shifts.append({
-            "id": str(uuid.uuid4()),
-            "site_id": site_ids[i % 4],
-            "start": iso(d.replace(hour=18 if i % 2 == 0 else 8)),
-            "end": iso(d.replace(hour=23, minute=59) + timedelta(hours=2 if i % 2 == 0 else -7)),
-            "role": ["Patrol", "Concierge", "Event Security", "K9 Support"][i % 4],
-            "pay_rate": [24.5, 26.0, 28.0, 30.0][i % 4],
-            "spots_available": (i % 3) + 1,
-            "posted_at": iso(now_utc() - timedelta(hours=i * 3)),
-            "claimed_by": [],
-            "waitlist": [],
-            "urgent": i < 2,
-        })
-    await db.open_shifts.insert_many(open_shifts)
-
-    # Announcements
-    announcements = [
-        {
-            "id": str(uuid.uuid4()), "title": "Winter Uniform Rollout",
-            "body": "All guards must collect winter jackets from HQ by Nov 15. Sign the equipment log on pickup.",
-            "severity": "info", "site_id": None, "posted_by": "Operations",
-            "posted_at": iso(now_utc() - timedelta(hours=4)),
-            "read_by": [],
-        },
-        {
-            "id": str(uuid.uuid4()), "title": "URGENT: Elevator Outage - Bay Street",
-            "body": "Elevator 3 at 88 Bay St is out of service until 22:00. Use stairwell C for patrol rounds. Report anyone using it.",
-            "severity": "critical", "site_id": site_ids[0], "posted_by": "Derek Cole",
-            "posted_at": iso(now_utc() - timedelta(hours=1)),
-            "read_by": [],
-        },
-        {
-            "id": str(uuid.uuid4()), "title": "Payroll Cycle Update",
-            "body": "This period closes Sunday 23:59. Ensure all timecards are submitted with GPS + selfie verification.",
-            "severity": "info", "site_id": None, "posted_by": "Payroll",
-            "posted_at": iso(now_utc() - timedelta(days=1)),
-            "read_by": [guard_id],
-        },
-        {
-            "id": str(uuid.uuid4()), "title": "Emergency Contact Drill",
-            "body": "Full drill Thu 03:00. All patrol staff must acknowledge this notice by 20:00.",
-            "severity": "warning", "site_id": None, "posted_by": "HQ Command",
-            "posted_at": iso(now_utc() - timedelta(hours=8)),
-            "read_by": [],
-        },
-    ]
-    await db.announcements.insert_many(announcements)
-
-    # Payroll periods
-    payroll_periods = []
-    for i in range(4):
-        period_end = today - timedelta(days=i * 14)
-        period_start = period_end - timedelta(days=13)
-        stages = ["paid", "released", "under_review", "submitted"]
-        payroll_periods.append({
-            "id": str(uuid.uuid4()),
-            "user_id": guard_id,
-            "period_start": iso(period_start),
-            "period_end": iso(period_end),
-            "pay_date": iso(period_end + timedelta(days=5)),
-            "hours_regular": 76.5 - i * 2,
-            "hours_overtime": 4.0 if i == 0 else 0.0,
-            "gross": (76.5 - i * 2) * 24.5 + (98 if i == 0 else 0),
-            "net": ((76.5 - i * 2) * 24.5 + (98 if i == 0 else 0)) * 0.72,
-            "status": stages[i],
-            "pay_stub_url": None,
-        })
-    await db.payroll.insert_many(payroll_periods)
-
-    # Wallet documents
-    wallet_docs = [
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "security_licence",
-         "name": "Ontario Security Guard Licence", "number": "SG-ON-89442",
-         "expiry": iso(now_utc() + timedelta(days=42)), "status": "expiring_soon"},
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "company_id",
-         "name": "Skyhawk Company ID", "number": "SH-2041",
-         "expiry": iso(now_utc() + timedelta(days=800)), "status": "valid"},
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "first_aid",
-         "name": "First Aid & CPR", "number": "FA-2024-88112",
-         "expiry": iso(now_utc() + timedelta(days=210)), "status": "valid"},
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "smart_serve",
-         "name": "Smart Serve Ontario", "number": "SS-2025-4421",
-         "expiry": iso(now_utc() + timedelta(days=500)), "status": "valid"},
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "whmis",
-         "name": "WHMIS 2015", "number": "WH-2025-9012",
-         "expiry": iso(now_utc() + timedelta(days=300)), "status": "valid"},
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "work_permit",
-         "name": "Work Permit", "number": "WP-CA-88214",
-         "expiry": iso(now_utc() + timedelta(days=900)), "status": "valid"},
-    ]
-    await db.wallet_documents.insert_many(wallet_docs)
-
-    # Equipment assigned
-    await db.equipment.insert_many([
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "uniform",
-         "description": "Winter Jacket XL / Trousers 34", "issued_at": iso(now_utc() - timedelta(days=180)), "status": "issued"},
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "radio",
-         "description": "Motorola CP200d #R-4412", "issued_at": iso(now_utc() - timedelta(days=90)), "status": "issued"},
-        {"id": str(uuid.uuid4()), "user_id": guard_id, "type": "keys",
-         "description": "Master keyring #K-88 (Bay St)", "issued_at": iso(now_utc() - timedelta(days=60)), "status": "issued"},
-    ])
-
-    logger.info("Seed complete.")
 
 
 # ============================================================
@@ -810,6 +838,8 @@ async def root():
 @api.post("/auth/register", response_model=AuthOut)
 @limiter.limit("5/minute")
 async def register(request: Request, body: RegisterIn):
+    if not ALLOW_PUBLIC_REGISTRATION:
+        raise HTTPException(403, "Guard accounts must be created by an authorized manager")
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
         raise HTTPException(400, "Email already registered")
@@ -840,25 +870,114 @@ async def register(request: Request, body: RegisterIn):
     }
     await db.users.insert_one(user)
     token = create_access_token(user_id, user["email"], "employee")
-    user.pop("hashed_password", None)
-    user.pop("_id", None)
-    return {"access_token": token, "token_type": "bearer", "user": user}
+    refresh_token = await create_refresh_token(user_id)
+    return {"access_token": token, "refresh_token": refresh_token, "token_type": "bearer", "user": safe_user_document(user)}
 
 
 @api.post("/auth/login", response_model=AuthOut)
 @limiter.limit("10/minute")
-async def login(request: Request, body: LoginIn):
+async def login(request: Request, response: Response, body: LoginIn):
     user = await db.users.find_one({"email": body.email.lower()})
     if not user or not verify_password(body.password, user["hashed_password"]):
         raise HTTPException(401, "Invalid email or password")
     if user.get("access_status", "active") != "active":
         raise HTTPException(403, "This account has been disabled by company administration")
     if user.get("role") == "admin":
-        user["manager_permissions"] = normalize_manager_permissions(user.get("manager_permissions"))
+        raise HTTPException(403, "Manager accounts must sign in through the Manager Portal")
     token = create_access_token(user["id"], user["email"], user["role"])
-    user.pop("hashed_password", None)
+    refresh_token = await create_refresh_token(user["id"])
+    return {"access_token": token, "refresh_token": refresh_token, "token_type": "bearer", "user": safe_user_document(user)}
+
+
+@api.post("/auth/manager-login", response_model=ManagerAuthOut)
+@limiter.limit("10/minute")
+async def manager_login(request: Request, response: Response, body: LoginIn):
+    user = await db.users.find_one({"email": body.email.lower(), "role": "admin"})
+    if not user or not verify_password(body.password, user["hashed_password"]):
+        raise HTTPException(401, "Invalid email, password, or verification code")
+    if user.get("access_status", "active") != "active":
+        raise HTTPException(403, "This account has been disabled by company administration")
+    if not await verify_manager_mfa(user, body.mfa_code):
+        raise HTTPException(401, "Invalid email, password, or verification code")
+    user["manager_permissions"] = normalize_manager_permissions(user.get("manager_permissions"))
+    session_id = str(uuid.uuid4())
+    expires_at = now_utc() + timedelta(hours=MANAGER_SESSION_HOURS)
+    await db.manager_sessions.insert_one({
+        "id": session_id,
+        "user_id": user["id"],
+        "created_at": now_utc(),
+        "expires_at": expires_at,
+    })
+    token = create_access_token(
+        user["id"], user["email"], user["role"],
+        expires_minutes=MANAGER_SESSION_HOURS * 60,
+        session_id=session_id,
+    )
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=MANAGER_SESSION_HOURS * 3600,
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+    return {"user": safe_user_document(user)}
+
+
+@api.post("/auth/refresh", response_model=AuthOut)
+@limiter.limit("20/minute")
+async def refresh_access_token(request: Request, body: RefreshTokenIn):
+    digest = refresh_token_digest(body.refresh_token)
+    current = await db.refresh_tokens.find_one_and_update({
+        "token_digest": digest,
+        "expires_at": {"$gte": now_utc()},
+        "used_at": {"$exists": False},
+        "revoked_at": {"$exists": False},
+    }, {"$set": {"used_at": now_utc()}}, return_document=ReturnDocument.BEFORE)
+    if not current:
+        reused = await db.refresh_tokens.find_one({"token_digest": digest})
+        if reused and reused.get("family_id"):
+            await db.refresh_tokens.delete_many({"family_id": reused["family_id"]})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired refresh token")
+    user = await db.users.find_one({"id": current["user_id"]}, SENSITIVE_USER_PROJECTION)
+    if not user or user.get("access_status", "active") != "active" or user.get("role") != "employee":
+        await db.refresh_tokens.delete_many({"family_id": current["family_id"]})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account access is unavailable")
+    replacement = await create_refresh_token(user["id"], current["family_id"])
     user.pop("_id", None)
-    return {"access_token": token, "token_type": "bearer", "user": user}
+    return {
+        "access_token": create_access_token(user["id"], user["email"], user["role"]),
+        "refresh_token": replacement,
+        "token_type": "bearer",
+        "user": user,
+    }
+
+
+@api.post("/auth/logout-native", status_code=204)
+async def logout_native(body: RefreshTokenIn):
+    current = await db.refresh_tokens.find_one({"token_digest": refresh_token_digest(body.refresh_token)})
+    if current:
+        await db.refresh_tokens.delete_many({"family_id": current["family_id"]})
+
+
+@api.post("/auth/logout", status_code=204)
+async def logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token:
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
+            if payload.get("typ") == "access" and payload.get("jti"):
+                await db.manager_sessions.delete_one({"id": payload["jti"], "user_id": payload.get("sub")})
+        except jwt.PyJWTError:
+            pass
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        path="/",
+        secure=SESSION_COOKIE_SECURE,
+        httponly=True,
+        samesite="lax",
+    )
 
 
 @api.get("/auth/me")
@@ -878,6 +997,8 @@ async def change_password(request: Request, body: ChangePasswordIn, user=Depends
     )
     # Invalidate any outstanding reset tokens once the password changes.
     await db.password_resets.delete_many({"user_id": user["id"]})
+    await db.refresh_tokens.delete_many({"user_id": user["id"]})
+    await db.manager_sessions.delete_many({"user_id": user["id"]})
     return {"status": "password_updated"}
 
 
@@ -891,17 +1012,18 @@ async def forgot_password(request: Request, body: ForgotPasswordIn):
     if not user:
         return generic
     raw_token = secrets.token_urlsafe(32)
+    token_digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
     await db.password_resets.update_one(
         {"user_id": user["id"]},
         {"$set": {
             "user_id": user["id"],
-            "token_hash": hash_password(raw_token),
-            "expires_at": iso(now_utc() + timedelta(minutes=RESET_TOKEN_TTL_MINUTES)),
+            "token_digest": token_digest,
+            "expires_at": now_utc() + timedelta(minutes=RESET_TOKEN_TTL_MINUTES),
             "created_at": iso(now_utc()),
         }},
         upsert=True,
     )
-    reset_link = f"skyhawksecurity://reset-password?token={raw_token}"
+    reset_link = f"disptchr://reset-password?token={raw_token}"
     html = notif.email_template(
         "Reset your Skyhawk password",
         [
@@ -913,32 +1035,32 @@ async def forgot_password(request: Request, body: ForgotPasswordIn):
         cta_text="Reset Password",
         cta_link=reset_link,
     )
-    sent = await notif.send_email(
+    await queue_email(
         user["email"],
         "Reset your Skyhawk Security password",
         html,
         f"Password reset link (expires in 30 min): {reset_link}",
+        f"password-reset:{user['id']}:{token_digest}",
     )
-    if not sent:
-        logger.info(
-            "Password reset token (email not configured)",
-            extra={"reset_token": raw_token, "user": user["email"]},
-        )
     return generic
 
 
 @api.post("/auth/reset-password")
 @limiter.limit("5/minute")
 async def reset_password(request: Request, body: ResetPasswordIn):
-    candidates = await db.password_resets.find({"expires_at": {"$gte": iso(now_utc())}}).to_list(1000)
-    match = next((c for c in candidates if verify_password(body.token, c["token_hash"])), None)
+    token_digest = hashlib.sha256(body.token.encode("utf-8")).hexdigest()
+    match = await db.password_resets.find_one_and_delete({
+        "token_digest": token_digest,
+        "expires_at": {"$gte": now_utc()},
+    })
     if not match:
         raise HTTPException(400, "Invalid or expired reset token")
     await db.users.update_one(
         {"id": match["user_id"]},
         {"$set": {"hashed_password": hash_password(body.new_password)}},
     )
-    await db.password_resets.delete_many({"user_id": match["user_id"]})
+    await db.refresh_tokens.delete_many({"user_id": match["user_id"]})
+    await db.manager_sessions.delete_many({"user_id": match["user_id"]})
     return {"status": "password_reset"}
 
 
@@ -961,7 +1083,7 @@ async def update_settings(body: SettingsIn, user=Depends(get_current_user)):
     updates = {f"preferences.{k}": v for k, v in body.model_dump(exclude_none=True).items()}
     if updates:
         await db.users.update_one({"id": user["id"]}, {"$set": updates})
-    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "hashed_password": 0})
+    fresh = await db.users.find_one({"id": user["id"]}, SENSITIVE_USER_PROJECTION)
     defaults = {
         "push_notifications": True,
         "location_sharing": True,
@@ -1019,15 +1141,126 @@ async def upload_file(request: Request, file: UploadFile = File(...), user=Depen
         raise HTTPException(413, "File too large (max 10 MB)")
     ext = mimetypes.guess_extension(file.content_type) or ""
     stored_name = f"{uuid.uuid4()}{ext}"
-    dest = UPLOAD_DIR / "attachments" / stored_name
-    dest.write_bytes(contents)
+    await storage.put(f"attachments/{stored_name}", contents, file.content_type)
+    canonical_url = f"/api/files/attachments/{stored_name}"
+    await db.stored_files.insert_one({
+        "id": str(uuid.uuid4()),
+        "category": "attachments",
+        "stored_name": stored_name,
+        "owner_id": user["id"],
+        "original_name": file.filename,
+        "content_type": file.content_type,
+        "byte_size": len(contents),
+        "created_at": iso(now_utc()),
+    })
     return {
-        "url": f"/uploads/attachments/{stored_name}",
+        "url": canonical_url,
         "name": file.filename,
         "content_type": file.content_type,
         "size": len(contents),
         "kind": "image" if file.content_type.startswith("image/") else "pdf",
     }
+
+
+def _validated_file_path(category: str, filename: str) -> Path:
+    if category not in {"attachments", "paystubs"}:
+        raise HTTPException(404, "File not found")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", filename) or filename in {".", ".."}:
+        raise HTTPException(404, "File not found")
+    path = (UPLOAD_DIR / category / filename).resolve()
+    expected_parent = (UPLOAD_DIR / category).resolve()
+    if path.parent != expected_parent:
+        raise HTTPException(404, "File not found")
+    return path
+
+
+async def _validated_file_key(category: str, filename: str) -> str:
+    _validated_file_path(category, filename)
+    key = f"{category}/{filename}"
+    if not await storage.exists(key):
+        raise HTTPException(404, "File not found")
+    return key
+
+
+async def _can_access_file(user: dict, category: str, filename: str) -> bool:
+    if user.get("role") == "admin":
+        return True
+    stored = await db.stored_files.find_one({
+        "category": category,
+        "stored_name": filename,
+    })
+    if stored and stored.get("owner_id") == user["id"]:
+        return True
+    canonical = f"/api/files/{category}/{filename}"
+    legacy = f"/uploads/{category}/{filename}"
+    if category == "paystubs":
+        return bool(await db.payroll.find_one({
+            "user_id": user["id"],
+            "pay_stub_url": {"$in": [canonical, legacy]},
+        }))
+    if await db.wallet_documents.find_one({
+        "user_id": user["id"],
+        "attachment_url": {"$in": [canonical, legacy]},
+    }):
+        return True
+    # Community attachments are intentionally shared with every signed-in employee.
+    return bool(await db.community_posts.find_one({
+        "attachments.url": {"$in": [canonical, legacy]},
+    }))
+
+
+def _file_access_token(user_id: str, category: str, filename: str) -> str:
+    now = now_utc()
+    return jwt.encode({
+        "sub": user_id,
+        "scope": "file.read",
+        "file": f"{category}/{filename}",
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
+    }, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+@api.get("/files/{category}/{filename}/access")
+async def create_file_access(category: str, filename: str, user=Depends(get_current_user)):
+    await _validated_file_key(category, filename)
+    if not await _can_access_file(user, category, filename):
+        raise HTTPException(403, "You do not have access to this file")
+    file_token = _file_access_token(user["id"], category, filename)
+    return {"url": f"/api/files/{category}/{filename}?file_token={file_token}", "expires_in": 300}
+
+
+@api.get("/files/{category}/{filename}")
+async def download_file(
+    category: str,
+    filename: str,
+    request: Request,
+    file_token: Optional[str] = Query(default=None),
+):
+    key = await _validated_file_key(category, filename)
+    if file_token:
+        try:
+            claims = jwt.decode(file_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        except jwt.PyJWTError as exc:
+            raise HTTPException(401, "Invalid or expired file link") from exc
+        if claims.get("scope") != "file.read" or claims.get("file") != f"{category}/{filename}":
+            raise HTTPException(403, "File link does not match this file")
+    else:
+        header = request.headers.get("authorization", "")
+        access_token = header[7:] if header.lower().startswith("bearer ") else request.cookies.get(SESSION_COOKIE_NAME)
+        if not access_token:
+            raise HTTPException(401, "Not authenticated")
+        user = await _user_from_access_token(access_token)
+        if not await _can_access_file(user, category, filename):
+            raise HTTPException(403, "You do not have access to this file")
+    content, stored_content_type = await storage.get(key)
+    metadata = await db.stored_files.find_one({"category": category, "stored_name": filename})
+    download_name = (metadata or {}).get("original_name") or filename
+    content_type = stored_content_type or (metadata or {}).get("content_type") or "application/octet-stream"
+    return StreamingResponse(io.BytesIO(content), media_type=content_type, headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(download_name)}",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 # ============================================================
@@ -1301,6 +1534,18 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
+def valid_selfie_base64(value: str) -> bool:
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        return False
+    return (
+        raw.startswith(b"\xff\xd8\xff")
+        or raw.startswith(b"\x89PNG\r\n\x1a\n")
+        or (len(raw) > 12 and raw[:4] in {b"II*\x00", b"MM\x00*"})
+    )
+
+
 @api.get("/timeclock/status")
 async def timeclock_status(user=Depends(get_current_user)):
     active = await db.timeclock.find_one({"user_id": user["id"], "clock_out": None}, {"_id": 0, "selfie_in": 0, "selfie_out": 0})
@@ -1313,32 +1558,33 @@ async def clock_in(body: ClockInIn, user=Depends(get_current_user)):
     if existing:
         raise HTTPException(400, "Already clocked in. Clock out first.")
 
-    site = None
-    sh = None
-    geofence_ok = True
-    distance_m = None
-    if body.site_id:
-        site = await db.sites.find_one({"id": body.site_id}, {"_id": 0})
-    elif body.shift_id:
-        sh = await db.shifts.find_one({"id": body.shift_id})
-        if sh:
-            site = await db.sites.find_one({"id": sh["site_id"]}, {"_id": 0})
-
-    if site:
-        distance_m = haversine_m(body.latitude, body.longitude, site["latitude"], site["longitude"])
-        geofence_ok = distance_m <= site.get("geofence_radius_m", 200)
+    if not valid_selfie_base64(body.selfie_base64):
+        raise HTTPException(400, "A valid JPEG, PNG, or HEIC selfie is required")
+    sh = await db.shifts.find_one({"id": body.shift_id, "user_id": user["id"], "status": "scheduled"})
+    if not sh:
+        raise HTTPException(404, "Assigned scheduled shift not found")
+    site = await db.sites.find_one({"id": sh.get("site_id")}, {"_id": 0})
+    if not site or not isinstance(site.get("latitude"), (int, float)) or not isinstance(site.get("longitude"), (int, float)):
+        raise HTTPException(409, "The assigned site has no verified geofence")
+    try:
+        shift_start = datetime.fromisoformat(sh["start"].replace("Z", "+00:00"))
+        shift_end = datetime.fromisoformat(sh["end"].replace("Z", "+00:00"))
+        if shift_start.tzinfo is None: shift_start = shift_start.replace(tzinfo=timezone.utc)
+        if shift_end.tzinfo is None: shift_end = shift_end.replace(tzinfo=timezone.utc)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(409, "The assigned shift has invalid start or end times") from exc
+    current_time = now_utc()
+    if current_time < shift_start - timedelta(hours=2) or current_time > shift_end + timedelta(hours=4):
+        raise HTTPException(409, "Clock-in is outside the allowed shift window")
+    distance_m = haversine_m(body.latitude, body.longitude, site["latitude"], site["longitude"])
+    radius_m = max(25, min(float(site.get("geofence_radius_m", 200)), 2000))
+    geofence_ok = distance_m <= radius_m
+    if not geofence_ok:
+        raise HTTPException(403, f"You are outside the assigned site geofence ({round(distance_m)} m away)")
 
     # Detect late clock-in (> 15 min after shift start)
-    late_clock_in = False
-    if sh and sh.get("start"):
-        try:
-            shift_start_dt = datetime.fromisoformat(sh["start"].replace("Z", "+00:00"))
-            if shift_start_dt.tzinfo is None:
-                shift_start_dt = shift_start_dt.replace(tzinfo=timezone.utc)
-            mins_late = (now_utc() - shift_start_dt).total_seconds() / 60
-            late_clock_in = mins_late > 15
-        except Exception:
-            pass
+    mins_late = (current_time - shift_start).total_seconds() / 60
+    late_clock_in = mins_late > 15
 
     entry = {
         "id": str(uuid.uuid4()),
@@ -1432,7 +1678,11 @@ async def timeclock_history(user=Depends(get_current_user), limit: int = 20):
 @api.get("/wallet")
 async def wallet(user=Depends(get_current_user)):
     docs = await db.wallet_documents.find({"user_id": user["id"]}, {"_id": 0}).to_list(50)
-    qr_payload = f"SKYHAWK|{user['employee_number']}|{user['id']}"
+    qr_payload = jwt.encode({
+        "sub": user["id"], "employee_number": user.get("employee_number"),
+        "typ": "employee_badge", "aud": "disptchr-manager",
+        "iat": now_utc(), "exp": now_utc() + timedelta(minutes=5),
+    }, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return {
         "documents": docs,
         "employee": {
@@ -1445,6 +1695,7 @@ async def wallet(user=Depends(get_current_user)):
             "employment_status": user.get("employment_status"),
         },
         "qr_payload": qr_payload,
+        "qr_expires_in_seconds": 300,
     }
 
 
@@ -1581,7 +1832,19 @@ async def onboarding_documents(body: OnboardingDocIn, user=Depends(get_current_u
 
 @api.post("/onboarding/sin", status_code=201)
 async def onboarding_sin(body: OnboardingSINIn, user=Depends(get_current_user)):
-    await db.users.update_one({"id": user["id"]}, {"$set": {"sin": body.sin}})
+    normalized = re.sub(r"\D", "", body.sin)
+    if len(normalized) != 9:
+        raise HTTPException(400, "SIN must contain exactly 9 digits")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {
+            "$set": {
+                "sin_encrypted": encrypt_private_value(normalized),
+                "sin_last4": normalized[-4:],
+            },
+            "$unset": {"sin": ""},
+        },
+    )
     await db.onboarding.update_one(
         {"user_id": user["id"]},
         {"$set": {"sin_submitted": True, "updated_at": iso(now_utc())}},
@@ -1592,9 +1855,16 @@ async def onboarding_sin(body: OnboardingSINIn, user=Depends(get_current_user)):
 
 @api.post("/onboarding/direct-deposit", status_code=201)
 async def onboarding_direct_deposit(body: OnboardingDirectDepositIn, user=Depends(get_current_user)):
+    bank_record = body.model_dump()
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"direct_deposit": {"institution": body.institution, "transit": body.transit, "account": body.account}}},
+        {
+            "$set": {
+                "direct_deposit_encrypted": encrypt_private_value(json.dumps(bank_record, separators=(",", ":"))),
+                "direct_deposit_last4": body.account[-4:],
+            },
+            "$unset": {"direct_deposit": ""},
+        },
     )
     await db.onboarding.update_one(
         {"user_id": user["id"]},
@@ -1636,29 +1906,16 @@ async def onboarding_agreements(body: OnboardingAgreementsIn, user=Depends(get_c
 # PUSH NOTIFICATIONS
 # ============================================================
 @api.post("/register-push", status_code=201)
-async def register_push(body: RegisterPushIn):
-    try:
-        resp = await push_client.post("/api/v1/push/users/register", json=body.model_dump())
-        if resp.status_code == 401:
-            # Placeholder key - store locally
-            await db.push_tokens.update_one(
-                {"user_id": body.user_id, "device_token": body.device_token},
-                {"$set": body.model_dump()},
-                upsert=True,
-            )
-            return {"status": "registered_local"}
-        if resp.status_code >= 500:
-            raise HTTPException(502, "Push provider unavailable")
-        resp.raise_for_status()
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"Push register fallback: {e}")
-        await db.push_tokens.update_one(
-            {"user_id": body.user_id, "device_token": body.device_token},
-            {"$set": body.model_dump()},
-            upsert=True,
-        )
+async def register_push(body: RegisterPushIn, user=Depends(get_current_user)):
+    if not re.fullmatch(r"(?:ExponentPushToken|ExpoPushToken)\[[^\]]+\]", body.device_token):
+        raise HTTPException(400, "Invalid Expo push token")
+    registration = body.model_dump()
+    registration["user_id"] = user["id"]
+    await db.push_tokens.update_one(
+        {"user_id": user["id"], "device_token": body.device_token},
+        {"$set": registration},
+        upsert=True,
+    )
     return {"status": "registered"}
 
 
@@ -1681,6 +1938,12 @@ async def require_control_panel(request: Request):
     }
 
 
+@api.get("/control/health")
+async def control_health(_control_actor=Depends(require_control_panel)):
+    await db.command("ping")
+    return {"status": "ok"}
+
+
 def manager_access_view(user: dict) -> dict:
     return {
         "id": user["id"],
@@ -1689,6 +1952,7 @@ def manager_access_view(user: dict) -> dict:
         "phone": user.get("phone"),
         "status": user.get("access_status", "active"),
         "permissions": normalize_manager_permissions(user.get("manager_permissions")),
+        "mfa_enabled": bool(user.get("mfa_enabled")),
         "created_at": user.get("created_at"),
         "access_updated_at": user.get("access_updated_at"),
     }
@@ -1696,7 +1960,7 @@ def manager_access_view(user: dict) -> dict:
 
 class ControlManagerCreateIn(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=10, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
     full_name: str = Field(min_length=2, max_length=120)
     phone: Optional[str] = Field(default=None, max_length=40)
     status: Literal["active", "disabled"] = "active"
@@ -1710,10 +1974,14 @@ class ControlManagerUpdateIn(BaseModel):
     permissions: Optional[List[str]] = None
 
 
+class ControlManagerPasswordResetIn(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 @api.get("/control/managers")
 async def control_list_managers(_control_actor=Depends(require_control_panel)):
     managers = await db.users.find(
-        {"role": "admin"}, {"_id": 0, "hashed_password": 0}
+        {"role": "admin"}, SENSITIVE_USER_PROJECTION
     ).sort("full_name", 1).to_list(500)
     return {
         "managers": [manager_access_view(manager) for manager in managers],
@@ -1726,6 +1994,7 @@ async def control_create_manager(body: ControlManagerCreateIn, control_actor=Dep
     email = body.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(400, "Email already registered")
+    mfa_fields, mfa_setup = _manager_mfa_setup(email)
     manager = {
         "id": str(uuid.uuid4()),
         "email": email,
@@ -1745,6 +2014,7 @@ async def control_create_manager(body: ControlManagerCreateIn, control_actor=Dep
         "onboarding_complete": True,
         "created_at": iso(now_utc()),
         "access_updated_at": iso(now_utc()),
+        **mfa_fields,
     }
     await db.users.insert_one(manager)
     await db.access_audit.insert_one({
@@ -1760,7 +2030,48 @@ async def control_create_manager(body: ControlManagerCreateIn, control_actor=Dep
         "source": "disptchr-panel",
         "occurred_at": iso(now_utc()),
     })
-    return manager_access_view(manager)
+    return {**manager_access_view(manager), "mfa_setup": mfa_setup}
+
+
+@api.post("/control/managers/{manager_id}/reset-mfa")
+async def control_reset_manager_mfa(manager_id: str, control_actor=Depends(require_control_panel)):
+    manager = await db.users.find_one({"id": manager_id, "role": "admin"})
+    if not manager:
+        raise HTTPException(404, "Manager not found")
+    mfa_fields, mfa_setup = _manager_mfa_setup(manager["email"])
+    result = await db.users.update_one({"id": manager_id, "role": "admin"}, {"$set": mfa_fields})
+    if result.matched_count != 1:
+        raise HTTPException(404, "Manager not found")
+    await db.manager_sessions.delete_many({"user_id": manager_id})
+    await db.access_audit.insert_one({
+        "id": str(uuid.uuid4()), "action": "manager.mfa_reset", "manager_id": manager_id,
+        "manager_email": manager["email"], "actor": control_actor, "source": "disptchr-panel",
+        "occurred_at": iso(now_utc()),
+    })
+    return {**manager_access_view({**manager, **mfa_fields}), "mfa_setup": mfa_setup}
+
+
+@api.post("/control/managers/{manager_id}/reset-password")
+async def control_reset_manager_password(
+    manager_id: str,
+    body: ControlManagerPasswordResetIn,
+    control_actor=Depends(require_control_panel),
+):
+    manager = await db.users.find_one({"id": manager_id, "role": "admin"})
+    if not manager:
+        raise HTTPException(404, "Manager not found")
+    await db.users.update_one(
+        {"id": manager_id, "role": "admin"},
+        {"$set": {"hashed_password": hash_password(body.new_password), "access_updated_at": iso(now_utc())}},
+    )
+    await db.manager_sessions.delete_many({"user_id": manager_id})
+    await db.password_resets.delete_many({"user_id": manager_id})
+    await db.access_audit.insert_one({
+        "id": str(uuid.uuid4()), "action": "manager.password_reset", "manager_id": manager_id,
+        "manager_email": manager["email"], "actor": control_actor, "source": "disptchr-panel",
+        "occurred_at": iso(now_utc()),
+    })
+    return {"status": "password_reset"}
 
 
 @api.patch("/control/managers/{manager_id}")
@@ -1784,7 +2095,9 @@ async def control_update_manager(
     update["access_updated_at"] = iso(now_utc())
 
     await db.users.update_one({"id": manager_id}, {"$set": update})
-    updated = await db.users.find_one({"id": manager_id}, {"_id": 0, "hashed_password": 0})
+    if update.get("access_status") == "disabled":
+        await db.manager_sessions.delete_many({"user_id": manager_id})
+    updated = await db.users.find_one({"id": manager_id}, SENSITIVE_USER_PROJECTION)
     await db.access_audit.insert_one({
         "id": str(uuid.uuid4()),
         "action": "manager.access_updated",
@@ -1811,9 +2124,30 @@ async def require_admin(request: Request, user=Depends(get_current_user)):
     return user
 
 
+@api.post("/admin/employee-badge/verify")
+async def verify_employee_badge(body: BadgeVerifyIn, _admin=Depends(require_admin)):
+    try:
+        payload = jwt.decode(body.token, JWT_SECRET, algorithms=[JWT_ALGORITHM], audience="disptchr-manager")
+        if payload.get("typ") != "employee_badge" or not payload.get("sub"):
+            raise HTTPException(400, "Invalid employee badge")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(400, "Employee badge has expired")
+    except jwt.PyJWTError as exc:
+        raise HTTPException(400, "Invalid employee badge") from exc
+    employee = await db.users.find_one({"id": payload["sub"], "role": "employee"}, SENSITIVE_USER_PROJECTION)
+    if not employee or employee.get("access_status", "active") != "active":
+        raise HTTPException(404, "Active employee not found")
+    return {"valid": True, "employee": {
+        "id": employee["id"], "full_name": employee.get("full_name"),
+        "employee_number": employee.get("employee_number"),
+        "licence_number": employee.get("licence_number"),
+        "employment_status": employee.get("employment_status"),
+    }}
+
+
 class AdminCreateGuardIn(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=12, max_length=128)
     full_name: str
     phone: Optional[str] = None
     employee_number: Optional[str] = None
@@ -1824,6 +2158,7 @@ class AdminCreateGuardIn(BaseModel):
 
 
 class AdminUpdateGuardIn(BaseModel):
+    password: Optional[str] = Field(default=None, min_length=12, max_length=128)
     full_name: Optional[str] = None
     phone: Optional[str] = None
     employee_number: Optional[str] = None
@@ -1965,7 +2300,7 @@ async def admin_dashboard(admin=Depends(require_admin)):
     if active_entries:
         uids = [e["user_id"] for e in active_entries]
         sids = [e["site_id"] for e in active_entries if e.get("site_id")]
-        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, {"_id": 0, "hashed_password": 0}).to_list(20)}
+        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, SENSITIVE_USER_PROJECTION).to_list(20)}
         sm = {s["id"]: s for s in await db.sites.find({"id": {"$in": sids}}, {"_id": 0}).to_list(20)} if sids else {}
         for e in active_entries:
             e["user"] = um.get(e["user_id"])
@@ -1985,7 +2320,7 @@ async def admin_dashboard(admin=Depends(require_admin)):
 @api.get("/admin/guards")
 async def admin_list_guards(admin=Depends(require_admin)):
     guards = await db.users.find(
-        {"role": "employee"}, {"_id": 0, "hashed_password": 0}
+        {"role": "employee"}, SENSITIVE_USER_PROJECTION
     ).sort("full_name", 1).to_list(500)
     return {"guards": guards}
 
@@ -2014,7 +2349,7 @@ async def admin_create_guard(body: AdminCreateGuardIn, admin=Depends(require_adm
 @api.get("/admin/guards/{guard_id}")
 async def admin_get_guard(guard_id: str, admin=Depends(require_admin)):
     guard = await db.users.find_one(
-        {"id": guard_id, "role": "employee"}, {"_id": 0, "hashed_password": 0}
+        {"id": guard_id, "role": "employee"}, SENSITIVE_USER_PROJECTION
     )
     if not guard:
         raise HTTPException(404, "Guard not found")
@@ -2040,13 +2375,23 @@ async def admin_get_guard(guard_id: str, admin=Depends(require_admin)):
 @api.put("/admin/guards/{guard_id}")
 async def admin_update_guard(guard_id: str, body: AdminUpdateGuardIn, admin=Depends(require_admin)):
     update = {k: v for k, v in body.model_dump().items() if v is not None}
+    new_password = update.pop("password", None)
+    if new_password:
+        update["hashed_password"] = hash_password(new_password)
     if not update:
         raise HTTPException(400, "No fields to update")
     r = await db.users.update_one({"id": guard_id, "role": "employee"}, {"$set": update})
     if r.matched_count == 0:
         raise HTTPException(404, "Guard not found")
+    if new_password:
+        await db.refresh_tokens.delete_many({"user_id": guard_id})
+        await db.access_audit.insert_one({
+            "id": str(uuid.uuid4()), "action": "guard.password_reset", "guard_id": guard_id,
+            "actor": {"id": admin["id"], "name": admin.get("full_name")},
+            "occurred_at": iso(now_utc()),
+        })
     return await db.users.find_one(
-        {"id": guard_id, "role": "employee"}, {"_id": 0, "hashed_password": 0}
+        {"id": guard_id, "role": "employee"}, SENSITIVE_USER_PROJECTION
     )
 
 
@@ -2112,7 +2457,7 @@ async def admin_list_shifts(
         sids = list({s["site_id"] for s in shifts})
         uids = list({s["user_id"] for s in shifts})
         sm = {s["id"]: s for s in await db.sites.find({"id": {"$in": sids}}, {"_id": 0}).to_list(200)}
-        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, {"_id": 0, "hashed_password": 0}).to_list(500)}
+        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, SENSITIVE_USER_PROJECTION).to_list(500)}
         for s in shifts:
             s["site"] = sm.get(s["site_id"]); s["user"] = um.get(s["user_id"])
     return {"shifts": shifts}
@@ -2223,10 +2568,11 @@ async def admin_create_announcement(body: AdminCreateAnnouncementIn, admin=Depen
         body.title,
         [body.body],
         cta_text="View in App",
-        cta_link="skyhawksecurity://announcements",
+        cta_link="disptchr://notifications",
     )
     await asyncio.gather(
-        *[notif.send_email(g["email"], f"[Skyhawk] {body.title}", ann_html, body.body) for g in guards if g.get("email")],
+        *[queue_email(g["email"], f"[Skyhawk] {body.title}", ann_html, body.body,
+            f"announcement:{ann['id']}:email:{g['id']}") for g in guards if g.get("email")],
         notif.save_inapp(db, guard_ids, body.title, body.body[:300], category="announcement"),
         return_exceptions=True,
     )
@@ -2275,6 +2621,36 @@ async def admin_update_incident(inc_id: str, body: AdminUpdateIncidentIn, admin=
 # ADMIN ROUTES — Payroll
 # ============================================================
 
+PAYROLL_FEATURE_KEYS = {"paystub", "bulk", "dashboard", "anomaly", "overlap", "comments"}
+PAYROLL_COLUMN_KEYS = {"guard", "period", "hours", "rate", "gross", "deductions", "net", "paid_via", "status", "lic", "projects"}
+TIMESHEET_COLUMN_KEYS = {"guard_name", "lic", "status", "shifts", "hours", "period", "projects", "rate", "gross"}
+
+
+@api.get("/admin/preferences/payroll")
+async def get_manager_payroll_preferences(admin=Depends(require_admin)):
+    return admin.get("manager_preferences", {}).get("payroll", {})
+
+
+@api.patch("/admin/preferences/payroll")
+async def update_manager_payroll_preferences(body: ManagerPayrollPreferencesIn, admin=Depends(require_admin)):
+    updates: dict = {}
+    if body.features is not None:
+        updates["manager_preferences.payroll.features"] = {
+            key: bool(value) for key, value in body.features.items() if key in PAYROLL_FEATURE_KEYS
+        }
+    if body.columns is not None:
+        updates["manager_preferences.payroll.columns"] = {
+            key: bool(value) for key, value in body.columns.items() if key in PAYROLL_COLUMN_KEYS
+        }
+    if body.timesheet_columns is not None:
+        updates["manager_preferences.payroll.timesheet_columns"] = {
+            key: bool(value) for key, value in body.timesheet_columns.items() if key in TIMESHEET_COLUMN_KEYS
+        }
+    if updates:
+        await db.users.update_one({"id": admin["id"]}, {"$set": updates})
+    fresh = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "manager_preferences": 1})
+    return (fresh or {}).get("manager_preferences", {}).get("payroll", {})
+
 @api.get("/admin/payroll")
 async def admin_list_payroll(
     admin=Depends(require_admin),
@@ -2287,7 +2663,7 @@ async def admin_list_payroll(
     periods = await db.payroll.find(q, {"_id": 0}).sort("period_end", -1).to_list(500)
     if periods:
         uids = list({p["user_id"] for p in periods})
-        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, {"_id": 0, "hashed_password": 0}).to_list(500)}
+        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, SENSITIVE_USER_PROJECTION).to_list(500)}
         for p in periods: p["user"] = um.get(p["user_id"])
     return {"periods": periods}
 
@@ -2532,10 +2908,11 @@ async def admin_update_payroll(payroll_id: str, body: AdminUpdatePayrollIn, admi
                 f"Net pay: <strong>${updated.get('net', 0):.2f}</strong> (Gross: ${updated.get('gross', 0):.2f})",
             ],
             cta_text="View Pay Stub",
-            cta_link="skyhawksecurity://wallet",
+            cta_link="disptchr://payroll",
         )
         await asyncio.gather(
-            notif.send_email(guard["email"], "Your Skyhawk pay has been released", pay_html) if guard and guard.get("email") else asyncio.sleep(0),
+            queue_email(guard["email"], "Your Skyhawk pay has been released", pay_html, "",
+                f"payroll:{updated['id']}:email") if guard and guard.get("email") else asyncio.sleep(0),
             notif.save_inapp(db, [updated["user_id"]], "Payroll Released 💰", f"Pay for {updated.get('period_end','')[:10]} released. Net: ${updated.get('net', 0):.2f}", category="payroll"),
             return_exceptions=True,
         )
@@ -2566,7 +2943,7 @@ async def admin_list_timeclock(
     if entries:
         uids = list({e["user_id"] for e in entries})
         sids = list({e["site_id"] for e in entries if e.get("site_id")})
-        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, {"_id": 0, "hashed_password": 0}).to_list(200)}
+        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, SENSITIVE_USER_PROJECTION).to_list(200)}
         sm = {s["id"]: s for s in await db.sites.find({"id": {"$in": sids}}, {"_id": 0}).to_list(50)} if sids else {}
         for e in entries:
             e["user"] = um.get(e["user_id"]); e["site"] = sm.get(e.get("site_id"))
@@ -2653,8 +3030,9 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         f"{body.message or 'Immediate assistance required.'}"
     )
     await asyncio.gather(
-        *[notif.send_email(a["email"], f"🆘 SOS ALERT — {user['full_name']}", sos_html) for a in admins if a.get("email")],
-        *[notif.send_sms(a["phone"], sms_body) for a in admins if a.get("phone")],
+        *[queue_email(a["email"], f"🆘 SOS ALERT — {user['full_name']}", sos_html, "",
+            f"sos:{alert['id']}:email:{a['id']}") for a in admins if a.get("email")],
+        *[queue_sms(a["phone"], sms_body, f"sos:{alert['id']}:sms:{a['id']}") for a in admins if a.get("phone")],
         notif.save_inapp(db, admin_ids, f"🆘 SOS — {user['full_name']}", body.message or "Guard needs immediate assistance", category="sos"),
         notif.save_inapp(db, [user["id"]], "SOS Alert Sent", "Your emergency alert has been sent to authorized response managers.", category="sos"),
         return_exceptions=True,
@@ -2670,7 +3048,7 @@ async def list_sos_active(admin=Depends(require_admin)):
     ).sort("created_at", -1).to_list(50)
     uids = list({a["user_id"] for a in alerts})
     if uids:
-        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, {"_id": 0, "hashed_password": 0}).to_list(50)}
+        um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, SENSITIVE_USER_PROJECTION).to_list(50)}
         for a in alerts:
             a["user"] = um.get(a["user_id"])
     return {"alerts": alerts}
@@ -2788,7 +3166,7 @@ async def live_locations(admin=Depends(require_admin)):
         return {"guards": []}
     uids = list({e["user_id"] for e in active_entries})
     sids = list({e["site_id"] for e in active_entries if e.get("site_id")})
-    um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, {"_id": 0, "hashed_password": 0}).to_list(100)}
+    um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, SENSITIVE_USER_PROJECTION).to_list(100)}
     sm = {s["id"]: s for s in await db.sites.find({"id": {"$in": sids}}, {"_id": 0}).to_list(50)} if sids else {}
     guards = []
     for entry in active_entries:
@@ -2917,8 +3295,10 @@ async def admin_swap_decision(swap_id: str, body: SwapActionIn, admin=Depends(re
         req_user = await db.users.find_one({"id": swap["requester_id"]},  {"phone": 1, "_id": 0})
         vol_user = await db.users.find_one({"id": swap["volunteer_id"]},  {"phone": 1, "_id": 0})
         await asyncio.gather(
-            notif.send_sms(req_user["phone"], f"Skyhawk: Your swap request for {swap['start'][:10]} was APPROVED. You're now off this shift.") if req_user and req_user.get("phone") else asyncio.sleep(0),
-            notif.send_sms(vol_user["phone"], f"Skyhawk: Shift swap APPROVED — you're now working {swap['start'][:10]}.") if vol_user and vol_user.get("phone") else asyncio.sleep(0),
+            queue_sms(req_user["phone"], f"Skyhawk: Your swap request for {swap['start'][:10]} was APPROVED. You're now off this shift.",
+                f"swap:{swap_id}:approved:sms:{req_user['id']}") if req_user and req_user.get("phone") else asyncio.sleep(0),
+            queue_sms(vol_user["phone"], f"Skyhawk: Shift swap APPROVED — you're now working {swap['start'][:10]}.",
+                f"swap:{swap_id}:approved:sms:{vol_user['id']}") if vol_user and vol_user.get("phone") else asyncio.sleep(0),
             notif.save_inapp(db, both_ids, "Shift Swap Approved ✓", f"The {swap['start'][:10]} shift has been transferred to {swap['volunteer_name']}.", category="swap"),
             return_exceptions=True,
         )
@@ -2945,11 +3325,11 @@ async def admin_list_swaps(admin=Depends(require_admin), status: Optional[str] =
 # PAYROLL ENGINE
 # ============================================================
 
-def _generate_pay_stub_pdf(record: dict) -> str:
+async def _generate_pay_stub_pdf(record: dict) -> str:
     """Render a simple one-page pay stub PDF and return its served URL."""
     filename = f"{record['id']}.pdf"
-    path = UPLOAD_DIR / "paystubs" / filename
-    c = pdf_canvas.Canvas(str(path), pagesize=letter)
+    buffer = io.BytesIO()
+    c = pdf_canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
     y = height - 72
 
@@ -3003,12 +3383,19 @@ def _generate_pay_stub_pdf(record: dict) -> str:
 
     c.showPage()
     c.save()
-    return f"/uploads/paystubs/{filename}"
+    content = buffer.getvalue()
+    await storage.put(f"paystubs/{filename}", content, "application/pdf")
+    await db.stored_files.insert_one({
+        "id": str(uuid.uuid4()), "category": "paystubs", "stored_name": filename,
+        "owner_id": record["user_id"], "original_name": f"paystub-{record['pay_date'][:10]}.pdf",
+        "content_type": "application/pdf", "byte_size": len(content), "created_at": iso(now_utc()),
+    })
+    return f"/api/files/paystubs/{filename}"
 
 
 @api.post("/admin/payroll/calculate", status_code=201)
 async def calculate_payroll(body: PayrollCalculateIn, admin=Depends(require_admin)):
-    user = await db.users.find_one({"id": body.user_id}, {"_id": 0, "hashed_password": 0})
+    user = await db.users.find_one({"id": body.user_id}, SENSITIVE_USER_PROJECTION)
     if not user:
         raise HTTPException(404, "User not found")
     try:
@@ -3050,7 +3437,7 @@ async def calculate_payroll(body: PayrollCalculateIn, admin=Depends(require_admi
         "created_at": iso(now_utc()),
         "created_by": admin["id"],
     }
-    record["pay_stub_url"] = _generate_pay_stub_pdf(record)
+    record["pay_stub_url"] = await _generate_pay_stub_pdf(record)
     await db.payroll.insert_one(record)
     record.pop("_id", None)
     return record
@@ -3107,7 +3494,7 @@ async def my_compliance(user=Depends(get_current_user)):
 
 @api.get("/admin/compliance")
 async def admin_compliance(admin=Depends(require_admin)):
-    guards = await db.users.find({"role": "employee"}, {"_id": 0, "hashed_password": 0}).to_list(200)
+    guards = await db.users.find({"role": "employee"}, SENSITIVE_USER_PROJECTION).to_list(200)
     results = []
     for g in guards:
         docs = await db.wallet_documents.find({"user_id": g["id"]}, {"_id": 0}).to_list(50)
@@ -3292,14 +3679,8 @@ app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
-    # Bearer-token auth only (no cookies), so credentials aren't needed. Keeping this
-    # False makes Starlette return "Access-Control-Allow-Origin: *" instead of echoing
-    # the Origin header, which the preview proxy rewrites and would otherwise break CORS.
-    allow_credentials=False,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Control-Panel-Key", "Idempotency-Key"],
 )
-
-# Serve user-uploaded files (incident/community attachments, generated pay stubs).
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")

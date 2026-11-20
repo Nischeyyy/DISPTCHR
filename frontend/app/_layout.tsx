@@ -1,8 +1,9 @@
 import { Stack, useRouter, useSegments } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
-import { LogBox, Platform, View, ActivityIndicator } from "react-native";
+import { Platform, View, ActivityIndicator } from "react-native";
 import * as Notifications from "expo-notifications";
+import Constants from "expo-constants";
 import * as Linking from "expo-linking";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -12,10 +13,8 @@ import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/auth/AuthContext";
 import { NotificationsProvider } from "@/src/context/NotificationsContext";
 import { theme } from "@/src/theme";
-import { api, getToken } from "@/src/api/client";
+import { api } from "@/src/api/client";
 import { ErrorBoundary } from "@/src/components/ErrorBoundary";
-
-LogBox.ignoreAllLogs(true);
 
 // Push notification module-scope setup
 if (Platform.OS !== "web") {
@@ -48,17 +47,12 @@ function AuthGate() {
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === "(auth)";
-    const inManagerGroup = segments[0] === "(manager)";
     const inTabsGroup = segments[0] === "(tabs)";
-    // Allow the register screen to complete its own multi-step flow before redirecting
-    const onRegisterScreen = segments[1] === "register";
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/login");
-    } else if (user && inAuthGroup && !onRegisterScreen) {
-      router.replace(user.role === "admin" ? "/(manager)" : "/(tabs)");
-    } else if (user && user.role === "admin" && inTabsGroup) {
-      router.replace("/(manager)");
-    } else if (user && user.role !== "admin" && inManagerGroup) {
+    } else if (user && inAuthGroup) {
+      router.replace("/(tabs)");
+    } else if (user && !inTabsGroup && !inAuthGroup) {
       router.replace("/(tabs)");
     }
   }, [user, loading, segments, router]);
@@ -69,7 +63,9 @@ function AuthGate() {
       try {
         const { status } = await Notifications.requestPermissionsAsync();
         if (status !== "granted") return;
-        const t = await Notifications.getDevicePushTokenAsync();
+        const projectId = Constants.easConfig?.projectId ?? Constants.expoConfig?.extra?.eas?.projectId;
+        if (!projectId) return;
+        const t = await Notifications.getExpoPushTokenAsync({ projectId });
         await api("/register-push", {
           method: "POST",
           body: { user_id: user.id, platform: Platform.OS, device_token: t.data as string },
@@ -107,14 +103,18 @@ export default function RootLayout() {
       const data = response.notification.request.content.data || {};
       const url = data.deeplink || data.action_url;
       if (url) {
-        typeof url === "string" && url.startsWith("http") ? Linking.openURL(url) : router.push(url as any);
+        if (typeof url === "string" && url.startsWith("http")) Linking.openURL(url);
+        else router.push(url as any);
       }
     });
     Notifications.getLastNotificationResponseAsync().then((response) => {
       if (!response) return;
       const data = response.notification.request.content.data || {};
       const url = data.deeplink || data.action_url;
-      if (url) typeof url === "string" && url.startsWith("http") ? Linking.openURL(url) : router.push(url as any);
+      if (url) {
+        if (typeof url === "string" && url.startsWith("http")) Linking.openURL(url);
+        else router.push(url as any);
+      }
     });
     return () => sub.remove();
   }, [router]);

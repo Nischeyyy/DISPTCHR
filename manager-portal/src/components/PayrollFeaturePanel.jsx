@@ -1,4 +1,4 @@
-import { X, FileText, CheckSquare, BarChart2, AlertTriangle, RefreshCw, Calendar, MessageSquare } from 'lucide-react';
+import { X, FileText, CheckSquare, BarChart2, AlertTriangle, Calendar, MessageSquare } from 'lucide-react';
 
 export const FEATURE_DEFS = [
   {
@@ -30,13 +30,6 @@ export const FEATURE_DEFS = [
     color: 'text-amber-600', bg: 'bg-amber-50', border: 'border-amber-200',
   },
   {
-    id: 'recurring',
-    icon: RefreshCw,
-    title: 'Recurring Schedules',
-    desc: 'Set a weekly or biweekly pay cadence per guard so entries auto-generate on schedule.',
-    color: 'text-indigo-600', bg: 'bg-indigo-50', border: 'border-indigo-200',
-  },
-  {
     id: 'overlap',
     icon: Calendar,
     title: 'Period Overlap Detection',
@@ -53,17 +46,6 @@ export const FEATURE_DEFS = [
 ];
 
 export const DEFAULT_FEATURES = Object.fromEntries(FEATURE_DEFS.map(f => [f.id, false]));
-
-export function loadFeatures() {
-  try {
-    const stored = localStorage.getItem('payroll_features');
-    return stored ? { ...DEFAULT_FEATURES, ...JSON.parse(stored) } : DEFAULT_FEATURES;
-  } catch { return DEFAULT_FEATURES; }
-}
-
-export function saveFeatures(f) {
-  localStorage.setItem('payroll_features', JSON.stringify(f));
-}
 
 export default function PayrollFeaturePanel({ features, onToggle, onClose }) {
   const enabledCount = Object.values(features).filter(Boolean).length;

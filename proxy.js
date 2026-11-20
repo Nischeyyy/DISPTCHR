@@ -42,7 +42,7 @@ function forward(req, res, targetPort) {
 
 const server = http.createServer((req, res) => {
   const url = req.url || '/';
-  const isApi     = url.startsWith('/api') || url.startsWith('/docs') || url.startsWith('/openapi.json');
+  const isApi     = url.startsWith('/api') || url.startsWith('/uploads') || url.startsWith('/docs') || url.startsWith('/openapi.json');
   const isManager = url.startsWith('/manager');
 
   // Strip Origin/Referer when forwarding to Expo / Vite dev servers so their

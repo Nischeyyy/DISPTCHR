@@ -9,7 +9,6 @@ export function formatDate(iso: string): string {
 }
 
 export function formatDateTime(iso: string): string {
-  const d = new Date(iso);
   return `${formatDate(iso)} · ${formatShiftTime(iso)}`;
 }
 

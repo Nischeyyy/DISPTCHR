@@ -142,7 +142,7 @@ export default function AdminShiftSwaps() {
                 </View>
 
                 {s.reason ? (
-                  <Text style={styles.reason}>"{s.reason}"</Text>
+                  <Text style={styles.reason}>“{s.reason}”</Text>
                 ) : null}
 
                 {needsAction && (

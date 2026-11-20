@@ -118,7 +118,7 @@ export default function ShiftSwaps() {
                   <Ionicons name="swap-horizontal-outline" size={44} color={theme.colors.textTertiary} />
                   <Text style={styles.emptyText}>No swap requests yet</Text>
                   <Text style={styles.emptySub}>
-                    From any scheduled shift, tap "Request Shift Swap" to post it here.
+                    From any scheduled shift, tap “Request Shift Swap” to post it here.
                   </Text>
                 </View>
               )}
@@ -136,7 +136,7 @@ export default function ShiftSwaps() {
                   </Text>
                   <Text style={styles.cardSite}>{s.site_name ?? "Unknown site"} · {s.role}</Text>
                   {s.reason ? (
-                    <Text style={styles.cardReason}>Reason: "{s.reason}"</Text>
+                    <Text style={styles.cardReason}>Reason: “{s.reason}”</Text>
                   ) : null}
                   {s.volunteer_name && s.status === "accepted" && (
                     <View style={styles.volunteerRow}>
@@ -202,7 +202,7 @@ export default function ShiftSwaps() {
                     </Text>
                     <Text style={styles.postedBy}>Posted by {s.requester_name}</Text>
                     {s.reason ? (
-                      <Text style={styles.cardReason}>"{s.reason}"</Text>
+                      <Text style={styles.cardReason}>“{s.reason}”</Text>
                     ) : null}
                     <Pressable
                       style={[styles.volunteerBtn, acting === s.id && { opacity: 0.6 }]}

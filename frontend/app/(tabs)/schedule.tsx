@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, RefreshControl, Animated } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -14,7 +14,6 @@ function addDays(d: Date, n: number): Date { const r = new Date(d); r.setDate(r.
 function startOfWeek(d: Date): Date { const n = startOfDay(d); return addDays(n, -n.getDay()); }
 function isSameDay(a: Date, b: Date): boolean { return a.toDateString() === b.toDateString(); }
 function dateKey(d: Date): string { return d.toDateString(); }
-function fmtTime(iso: string): string { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }); }
 function fmtWeekRange(start: Date, end: Date): string {
   const last = addDays(end, -1);
   const sameMonth = start.getMonth() === last.getMonth();
@@ -344,11 +343,11 @@ function ShiftRow({ shift, bordered, onPress, dark }: { shift: any; bordered: bo
 }
 
 function AnimatedDayCard({ dayKey, children }: { dayKey: string; children: React.ReactNode }) {
-  const anim = useRef(new Animated.Value(0)).current;
+  const [anim] = useState(() => new Animated.Value(0));
   useEffect(() => {
     anim.setValue(0);
     Animated.spring(anim, { toValue: 1, useNativeDriver: false, friction: 9, tension: 90 }).start();
-  }, [dayKey]);
+  }, [anim, dayKey]);
   const backgroundColor = anim.interpolate({ inputRange: [0, 1], outputRange: ["#2C2C2E", light.black] });
   const scale = anim.interpolate({ inputRange: [0, 1], outputRange: [0.95, 1] });
   const translateY = anim.interpolate({ inputRange: [0, 1], outputRange: [10, 0] });

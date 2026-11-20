@@ -1,8 +1,7 @@
 # DISPTCHR production stack — read by Openship (Project -> Services) and by plain `docker compose`.
 #
-#   edge (public, :80) ─┬─ /api, /uploads, /docs ──> api (:8001) ──> mongo (:27017)
-#                       ├─ /manager/*           ──> manager-portal
-#                       └─ /*                   ──> guard-web
+#   edge (public, :80) ─┬─ /api/*      ──> api (:8001) ──> managed MongoDB, Redis and object storage
+#                       └─ /manager/*  ──> manager-portal
 #
 # Only `edge` should be marked Public in Openship. Everything else stays Internal.
 # Copy .env.example to .env (or set the same keys in Openship -> Environment) before deploying.
@@ -15,7 +14,6 @@ services:
     depends_on:
       - api
       - manager-portal
-      - guard-web
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
@@ -28,59 +26,65 @@ services:
     ports:
       - "8001"
     environment:
-      # Default points at the bundled mongo service. To use MongoDB Atlas instead,
-      # set MONGO_URL to your mongodb+srv:// string and disable the mongo service.
-      MONGO_URL: ${MONGO_URL:-mongodb://mongo:27017}
+      MONGO_URL: ${MONGO_URL:?Set a managed MongoDB connection string}
       DB_NAME: ${DB_NAME:-disptchr}
-      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_SECRET: ${JWT_SECRET:?Set a JWT signing secret of at least 32 characters}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-168}
-      # Optional channels — the backend disables each one cleanly when unset.
-      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
-      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-}
-      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
-      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
-      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
-      EMERGENT_PUSH_KEY: ${EMERGENT_PUSH_KEY:-}
-    volumes:
-      # Incident attachments + generated pay stubs must survive redeploys (payroll retention).
-      - uploads:/app/uploads
-    depends_on:
-      - mongo
+      ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-15}
+      MANAGER_SESSION_HOURS: ${MANAGER_SESSION_HOURS:-8}
+      REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-30}
+      APP_ENV: ${APP_ENV:-production}
+      ALLOW_PUBLIC_REGISTRATION: ${ALLOW_PUBLIC_REGISTRATION:-false}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set comma-separated HTTPS application origins}
+      PII_ENCRYPTION_KEY: ${PII_ENCRYPTION_KEY:?Set a Fernet PII encryption key}
+      CONTROL_PANEL_API_KEY: ${CONTROL_PANEL_API_KEY:?Set a control-panel service key}
+      METRICS_TOKEN: ${METRICS_TOKEN:?Set a monitoring scrape token}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      RATE_LIMIT_STORAGE_URI: ${RATE_LIMIT_STORAGE_URI:?Set a managed Redis connection string}
+      STORAGE_BACKEND: s3
+      S3_BUCKET: ${S3_BUCKET:?Set a private object-storage bucket}
+      S3_REGION: ${S3_REGION:-ca-central-1}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # Transactional email and SMS are required for a production release.
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:?Set a SendGrid API key}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:?Set a verified sender address}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:?Set a Twilio account SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:?Set a Twilio auth token}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:?Set a Twilio sender number}
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8001/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-
   manager-portal:
     build: ./manager-portal
     ports:
       - "80"
     restart: unless-stopped
 
-  guard-web:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.web
-    ports:
-      - "80"
-    restart: unless-stopped
-
-  mongo:
-    image: mongo:7
-    ports:
-      - "27017"
-    volumes:
-      - mongo-data:/data/db
+  notification-worker:
+    build: ./backend
+    command: ["python", "job_worker.py"]
+    environment:
+      MONGO_URL: ${MONGO_URL:?Set a managed MongoDB connection string}
+      DB_NAME: ${DB_NAME:-disptchr}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:?Set a SendGrid API key}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:?Set a verified sender address}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:?Set a Twilio account SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:?Set a Twilio auth token}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:?Set a Twilio sender number}
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      test: ["CMD", "python", "worker_healthcheck.py"]
       interval: 30s
       timeout: 5s
-      retries: 5
+      retries: 3
 
-volumes:
-  uploads:
-  mongo-data:
+# The directors' Disptchr Panel is deployed from its separate repository.

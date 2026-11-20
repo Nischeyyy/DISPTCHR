@@ -1,7 +1,7 @@
 # DISPTCHR edge router — the single public entrypoint.
-#   /api, /uploads, /docs, /openapi.json  -> api
+#   /api/*                                 -> api
 #   /manager/*                            -> manager-portal
-#   /*                                    -> guard-web
+#   /                                     -> manager-portal redirect
 FROM nginx:1.27-alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

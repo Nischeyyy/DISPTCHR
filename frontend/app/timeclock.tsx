@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Platform } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as Location from "expo-location";
@@ -13,11 +13,22 @@ import { success as hapticSuccess, impact as hapticImpact } from "@/src/utils/ha
 
 type Step = "idle" | "locating" | "camera" | "confirming";
 
+type AssignedShift = {
+  id: string;
+  start: string;
+  end: string;
+  status: string;
+  role?: string;
+  site?: { name?: string };
+};
+
 export default function TimeClock() {
   const router = useRouter();
   const { shift_id } = useLocalSearchParams<{ shift_id?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
   const [active, setActive] = useState<any>(null);
+  const [assignedShift, setAssignedShift] = useState<AssignedShift | null>(null);
+  const [loadingShift, setLoadingShift] = useState(true);
   const [step, setStep] = useState<Step>("idle");
   const [loc, setLoc] = useState<Location.LocationObject | null>(null);
   const [selfie, setSelfie] = useState<string | null>(null);
@@ -26,7 +37,45 @@ export default function TimeClock() {
   const cameraRef = useRef<CameraView | null>(null);
 
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
-  useEffect(() => { api("/timeclock/status").then((d: any) => setActive(d.active)).catch(() => {}); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setLoadingShift(true);
+      setError(null);
+      try {
+        const status: any = await api("/timeclock/status");
+        if (cancelled) return;
+        setActive(status.active);
+        if (status.active) return;
+
+        if (shift_id) {
+          const shift: AssignedShift = await api(`/shifts/${encodeURIComponent(shift_id)}`);
+          if (!cancelled) setAssignedShift(shift);
+          return;
+        }
+
+        const nowMs = Date.now();
+        const from = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
+        const to = new Date(nowMs + 8 * 24 * 60 * 60 * 1000).toISOString();
+        const schedule: any = await api(`/schedule?start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`);
+        const eligible = (schedule.shifts || []).find((shift: AssignedShift) => {
+          if (shift.status !== "scheduled") return false;
+          const startMs = new Date(shift.start).getTime();
+          const endMs = new Date(shift.end).getTime();
+          return Number.isFinite(startMs) && Number.isFinite(endMs)
+            && nowMs >= startMs - 2 * 60 * 60 * 1000
+            && nowMs <= endMs + 4 * 60 * 60 * 1000;
+        });
+        if (!cancelled) setAssignedShift(eligible || null);
+      } catch (e: any) {
+        if (!cancelled) setError(e.message || "Your assigned shift could not be loaded.");
+      } finally {
+        if (!cancelled) setLoadingShift(false);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [shift_id]);
 
   // GPS location ping every 3 minutes while clocked in
   useEffect(() => {
@@ -45,18 +94,26 @@ export default function TimeClock() {
     ping(); // immediate ping on mount / clock-in
     const t = setInterval(ping, 3 * 60 * 1000);
     return () => clearInterval(t);
-  }, [active?.id]);
+  }, [active]);
 
   const beginClockIn = async () => {
     setError(null);
+    if (!assignedShift) {
+      setError("No assigned shift is currently inside the allowed clock-in window.");
+      return;
+    }
     setStep("locating");
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status === "granted") {
         const l = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         setLoc(l);
+      } else {
+        setError("Location permission is required to verify the work site.");
+        setStep("idle");
+        return;
       }
-    } catch {}
+    } catch { setError("Your location could not be verified. Try again outdoors or check location services."); setStep("idle"); return; }
     if (!permission?.granted) {
       const r = await requestPermission();
       if (!r.granted) { setError("Camera required for verification"); setStep("idle"); return; }
@@ -73,13 +130,13 @@ export default function TimeClock() {
   };
 
   const submitClockIn = async () => {
-    if (!selfie) return;
+    if (!selfie || !loc || !assignedShift) { setError("An eligible assigned shift, location, and selfie are required."); return; }
     setError(null);
     try {
       const r: any = await api("/timeclock/clock-in", {
         method: "POST",
         body: {
-          shift_id, latitude: loc?.coords.latitude ?? 43.6467, longitude: loc?.coords.longitude ?? -79.3785,
+          shift_id: assignedShift.id, latitude: loc.coords.latitude, longitude: loc.coords.longitude,
           selfie_base64: selfie,
         },
       });
@@ -94,11 +151,9 @@ export default function TimeClock() {
     setError(null);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      let latitude = 43.6467, longitude = -79.3785;
-      if (status === "granted") {
-        const l = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        latitude = l.coords.latitude; longitude = l.coords.longitude;
-      }
+      if (status !== "granted") throw new Error("Location permission is required to clock out.");
+      const l = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const latitude = l.coords.latitude; const longitude = l.coords.longitude;
       await api("/timeclock/clock-out", { method: "POST", body: { latitude, longitude } });
       hapticSuccess();
       setActive(null);
@@ -148,19 +203,12 @@ export default function TimeClock() {
         </ScrollView>
       ) : step === "camera" ? (
         <View style={{ flex: 1 }}>
-          {Platform.OS !== "web" ? (
-            <CameraView ref={cameraRef} facing="front" style={{ flex: 1 }} />
-          ) : (
-            <View style={styles.webCam}>
-              <Ionicons name="camera-outline" size={40} color={theme.colors.textSecondary} />
-              <Text style={styles.webCamText}>Camera preview (mobile only)</Text>
-            </View>
-          )}
+          <CameraView ref={cameraRef} facing="front" style={{ flex: 1 }} />
           <View style={styles.captureBar}>
             <Text style={styles.captureLabel}>Align your face in frame</Text>
             <Pressable
               testID="capture-selfie-btn"
-              onPress={Platform.OS === "web" ? () => { setSelfie("web-mock-selfie"); setStep("confirming"); } : captureSelfie}
+              onPress={captureSelfie}
               style={styles.captureBtn}
               accessibilityLabel="Capture selfie"
               accessibilityRole="button"
@@ -191,10 +239,23 @@ export default function TimeClock() {
             </Text>
             <Text style={styles.currentDate}>{now.toDateString()}</Text>
           </View>
+          {assignedShift ? (
+            <View style={styles.shiftCard}>
+              <Ionicons name="business-outline" size={20} color={theme.colors.text} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.shiftSite}>{assignedShift.site?.name || "Assigned work site"}</Text>
+                <Text style={styles.shiftMeta}>
+                  {assignedShift.role ? `${assignedShift.role} · ` : ""}{formatShiftTime(assignedShift.start)} – {formatShiftTime(assignedShift.end)}
+                </Text>
+              </View>
+            </View>
+          ) : !loadingShift && !error ? (
+            <Text style={styles.error}>No assigned shift is currently inside the allowed clock-in window.</Text>
+          ) : null}
           <Text style={styles.hint}>Location and selfie required to clock in.</Text>
           {error && <Text style={styles.error}>{error}</Text>}
           <View style={{ marginTop: 32 }}>
-            <Button testID="start-clock-in-btn" label="Clock In" onPress={beginClockIn} />
+            <Button testID="start-clock-in-btn" label={loadingShift ? "Loading Assignment…" : "Clock In"} disabled={loadingShift || !assignedShift} onPress={beginClockIn} />
           </View>
         </ScrollView>
       )}
@@ -211,6 +272,9 @@ const styles = StyleSheet.create({
   currentTime: { color: theme.colors.text, fontSize: 72, fontWeight: "300", letterSpacing: -2, fontVariant: ["tabular-nums"] },
   currentDate: { color: theme.colors.textSecondary, fontSize: 14, marginTop: 6 },
   hint: { color: theme.colors.textSecondary, fontSize: 14, textAlign: "center" },
+  shiftCard: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: theme.colors.card, borderRadius: theme.radius.md, padding: 16, marginBottom: 18 },
+  shiftSite: { color: theme.colors.text, fontSize: 15, fontWeight: "600" },
+  shiftMeta: { color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 },
   activeBlock: { alignItems: "center", paddingVertical: 40 },
   activeLabel: { color: theme.colors.textSecondary, fontSize: 12, letterSpacing: 0.8 },
   timer: { color: theme.colors.text, fontSize: 64, fontWeight: "300", marginTop: 12, letterSpacing: -1.5, fontVariant: ["tabular-nums"] },

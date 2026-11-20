@@ -1,21 +1,47 @@
 """Skyhawk Ops backend API tests"""
 import os
 import uuid
+import base64
+import hashlib
+import hmac
+import struct
+import time
+from datetime import datetime, timedelta, timezone
 import pytest
-import requests
+import httpx
 
-BASE_URL = "https://dispatch-core-34.preview.emergentagent.com"
-GUARD_EMAIL = "guard@skyhawk.com"
-GUARD_PASSWORD = "Password123"
-ADMIN_EMAIL = "admin@skyhawk.com"
-ADMIN_PASSWORD = "Admin123"
+pytestmark = pytest.mark.skipif(
+    os.environ.get("DISPTCHR_E2E_ENABLED") != "1",
+    reason="External end-to-end suite requires an explicitly configured disposable environment",
+)
+BASE_URL = os.environ.get("DISPTCHR_E2E_BASE_URL", "")
+GUARD_EMAIL = os.environ.get("DISPTCHR_E2E_GUARD_EMAIL", "")
+GUARD_PASSWORD = os.environ.get("DISPTCHR_E2E_GUARD_PASSWORD", "")
+ADMIN_EMAIL = os.environ.get("DISPTCHR_E2E_MANAGER_EMAIL", "")
+ADMIN_PASSWORD = os.environ.get("DISPTCHR_E2E_MANAGER_PASSWORD", "")
+ADMIN_MFA_CODE = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_CODE", "")
+ADMIN_MFA_SECRET = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_SECRET", "")
+
+
+def current_mfa_code():
+    if ADMIN_MFA_CODE:
+        return ADMIN_MFA_CODE
+    if not ADMIN_MFA_SECRET:
+        return ""
+    normalized = ADMIN_MFA_SECRET.replace(" ", "").upper()
+    key = base64.b32decode(normalized + "=" * ((8 - len(normalized) % 8) % 8))
+    step = int(time.time()) // 30
+    digest = hmac.new(key, struct.pack(">Q", step), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    return f"{(struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000:06d}"
 
 
 @pytest.fixture(scope="session")
 def session():
-    s = requests.Session()
+    s = httpx.Client(timeout=20.0, follow_redirects=False)
     s.headers.update({"Content-Type": "application/json"})
-    return s
+    yield s
+    s.close()
 
 
 @pytest.fixture(scope="session")
@@ -51,25 +77,20 @@ class TestAuth:
         assert "hashed_password" not in d["user"]
 
     def test_login_admin(self, session):
-        r = session.post(f"{BASE_URL}/api/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+        r = session.post(f"{BASE_URL}/api/auth/manager-login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "mfa_code": current_mfa_code()})
         assert r.status_code == 200
         assert r.json()["user"]["role"] == "admin"
+        assert "access_token" not in r.json()
 
     def test_login_wrong_password(self, session):
         r = session.post(f"{BASE_URL}/api/auth/login", json={"email": GUARD_EMAIL, "password": "wrong"})
         assert r.status_code == 401
 
-    def test_register_new_and_duplicate(self, session):
+    def test_public_registration_is_closed(self, session):
         email = f"TEST_{uuid.uuid4().hex[:8]}@skyhawk.com"
-        payload = {"email": email, "password": "Password123", "full_name": "TEST User", "phone": "+1 000"}
+        payload = {"email": email, "password": "A-long-test-password-123", "full_name": "TEST User", "phone": "+1 000"}
         r = session.post(f"{BASE_URL}/api/auth/register", json=payload)
-        assert r.status_code == 200, r.text
-        d = r.json()
-        assert "access_token" in d
-        assert d["user"]["email"] == email.lower()
-        # duplicate
-        r2 = session.post(f"{BASE_URL}/api/auth/register", json=payload)
-        assert r2.status_code == 400
+        assert r.status_code == 403, r.text
 
     def test_me_requires_auth(self, session):
         r = session.get(f"{BASE_URL}/api/auth/me")
@@ -169,19 +190,32 @@ class TestTimeClock:
                          headers=guard_headers,
                          json={"latitude": 43.6467, "longitude": -79.3785})
 
-        # Clock in near Toronto Financial Tower (geofence should pass)
+        schedule = session.get(f"{BASE_URL}/api/schedule?range=week", headers=guard_headers)
+        assert schedule.status_code == 200
+        now = datetime.now(timezone.utc)
+        eligible = next((shift for shift in schedule.json()["shifts"]
+                         if shift.get("status") == "scheduled" and shift.get("site")
+                         and datetime.fromisoformat(shift["start"].replace("Z", "+00:00")) - timedelta(hours=2) <= now
+                         <= datetime.fromisoformat(shift["end"].replace("Z", "+00:00")) + timedelta(hours=4)), None)
+        if not eligible:
+            pytest.skip("disposable environment has no currently clockable assigned shift")
+        latitude = eligible["site"]["latitude"]
+        longitude = eligible["site"]["longitude"]
+        selfie = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100).decode()
+
+        # Clock in at the assigned site's configured geofence.
         r1 = session.post(f"{BASE_URL}/api/timeclock/clock-in",
                           headers=guard_headers,
-                          json={"latitude": 43.6467, "longitude": -79.3785,
-                                "selfie_base64": "iVBORw0KGgoAAAAN"})
+                          json={"shift_id": eligible["id"], "latitude": latitude, "longitude": longitude,
+                                "selfie_base64": selfie})
         assert r1.status_code == 200, r1.text
         d = r1.json()
         assert d["entry"]["clock_in"] is not None
         # duplicate clock-in
         r_dup = session.post(f"{BASE_URL}/api/timeclock/clock-in",
                              headers=guard_headers,
-                             json={"latitude": 43.6467, "longitude": -79.3785,
-                                   "selfie_base64": "abc"})
+                             json={"shift_id": eligible["id"], "latitude": latitude, "longitude": longitude,
+                                   "selfie_base64": selfie})
         assert r_dup.status_code == 400
 
         # Break start/end
@@ -199,7 +233,7 @@ class TestTimeClock:
         # Clock out
         ro = session.post(f"{BASE_URL}/api/timeclock/clock-out",
                           headers=guard_headers,
-                          json={"latitude": 43.6467, "longitude": -79.3785, "selfie_base64": "abc"})
+                          json={"latitude": latitude, "longitude": longitude, "selfie_base64": selfie})
         assert ro.status_code == 200
         assert "hours_worked" in ro.json()
 
@@ -218,7 +252,8 @@ class TestWallet:
         d = r.json()
         assert "documents" in d and isinstance(d["documents"], list) and len(d["documents"]) > 0
         assert d["employee"]["employee_number"]
-        assert d["qr_payload"].startswith("SKYHAWK|")
+        assert d["qr_payload"].count(".") == 2
+        assert d["qr_expires_in_seconds"] == 300
 
 
 # ---- announcements ----

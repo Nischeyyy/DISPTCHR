@@ -7,7 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "@/src/theme";
-import { api } from "@/src/api/client";
+import { api, getProtectedFileUrl } from "@/src/api/client";
 import { formatCurrency } from "@/src/utils/format";
 
 const STAGES = [
@@ -39,6 +39,15 @@ export default function Payroll() {
         setStubPeriod(detail);
       } catch {}
       setStubLoading(false);
+    }
+  };
+
+  const openStubPdf = async (path: string) => {
+    try {
+      await Linking.openURL(await getProtectedFileUrl(path));
+    } catch {
+      // The in-app detail remains available even when the operating system
+      // cannot open an external PDF viewer.
     }
   };
 
@@ -181,7 +190,7 @@ export default function Payroll() {
                   <Pressable
                     testID="view-pdf-btn"
                     hitSlop={10}
-                    onPress={() => Linking.openURL(`${process.env.EXPO_PUBLIC_BACKEND_URL || ""}${stubPeriod.pay_stub_url}`)}
+                    onPress={() => openStubPdf(stubPeriod.pay_stub_url)}
                   >
                     <Ionicons name="document-text-outline" size={22} color={theme.colors.accent} />
                   </Pressable>

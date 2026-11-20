@@ -2,12 +2,13 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client.js';
 import { firstAllowedManagerPath } from '../auth/permissions.js';
-import { Bird, Lock, Mail, AlertCircle } from 'lucide-react';
+import { Bird, Lock, Mail, AlertCircle, ShieldCheck } from 'lucide-react';
 
 export default function Login() {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -16,13 +17,12 @@ export default function Login() {
     setError('');
     setLoading(true);
     try {
-      const data = await api.login(email, password);
+      const data = await api.login(email, password, mfaCode);
       if (data.user?.role !== 'admin') {
         setError('Access denied. Manager accounts only.');
         setLoading(false);
         return;
       }
-      localStorage.setItem('mgr_token', data.access_token);
       localStorage.setItem('mgr_user', JSON.stringify(data.user));
       navigate(firstAllowedManagerPath(data.user), { replace: true });
     } catch (err) {
@@ -68,7 +68,7 @@ export default function Login() {
                   value={email}
                   onChange={e => setEmail(e.target.value)}
                   className="input pl-9"
-                  placeholder="admin@skyhawk.com"
+                  placeholder="name@company.com"
                   required
                   autoFocus
                 />
@@ -90,14 +90,27 @@ export default function Login() {
               </div>
             </div>
 
+            <div>
+              <label className="label">Authenticator or recovery code</label>
+              <div className="relative">
+                <ShieldCheck size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  value={mfaCode}
+                  onChange={e => setMfaCode(e.target.value)}
+                  className="input pl-9"
+                  autoComplete="one-time-code"
+                  minLength={6}
+                  maxLength={32}
+                  required
+                />
+              </div>
+            </div>
+
             <button type="submit" disabled={loading} className="btn-primary w-full">
               {loading ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
 
-          <p className="text-xs text-gray-500 text-center">
-            Demo: admin@skyhawk.com / Admin123
-          </p>
         </div>
       </div>
     </div>

@@ -1,12 +1,11 @@
-import React, { useCallback, useState, useRef } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, RefreshControl, Animated } from "react-native";
+import React, { useCallback, useState } from "react";
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, RefreshControl } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/api/client";
 import { formatShiftTime, formatDate, hoursBetween, formatCurrency } from "@/src/utils/format";
 import { success as hapticSuccess, impact as hapticImpact } from "@/src/utils/haptics";
-import { DeadButton, DeadText } from "@/src/components/DeadButton";
 
 // ─── Light palette (matches Profile / Community / Wallet) ──────────────────
 const C = {
@@ -43,12 +42,20 @@ function Badge({ label, tone }: { label: string; tone: "accent" | "warning" }) {
 }
 
 export default function OpenShifts() {
+  const router = useRouter();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [claiming, setClaiming] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [nextSevenDaysOnly, setNextSevenDaysOnly] = useState(false);
+  const [sevenDayCutoff] = useState(() => Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    setTimeout(() => setToast(null), 2500);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -58,13 +65,8 @@ export default function OpenShifts() {
       if (e.message !== 'SESSION_EXPIRED') showToast(e.message || 'Failed to load shifts');
     }
     setLoading(false);
-  }, []);
+  }, [showToast]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
-
-  const showToast = (m: string) => {
-    setToast(m);
-    setTimeout(() => setToast(null), 2500);
-  };
 
   const claim = async (id: string) => {
     hapticImpact();
@@ -96,7 +98,8 @@ export default function OpenShifts() {
     }
   };
 
-  const shifts: any[] = data?.shifts || [];
+  const allShifts: any[] = data?.shifts || [];
+  const shifts: any[] = nextSevenDaysOnly ? allShifts.filter((shift) => new Date(shift.start).getTime() <= sevenDayCutoff) : allShifts;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -105,10 +108,8 @@ export default function OpenShifts() {
           <Text style={styles.title}>Open Shifts</Text>
           <Text style={styles.subtitle}>{shifts.length} available</Text>
         </View>
-        <Pressable testID="filter-btn" hitSlop={10} style={styles.filterBtn}>
-          <DeadButton style={styles.filterBtn}>
-            <Ionicons name="filter" size={18} color={C.text} />
-          </DeadButton>
+        <Pressable testID="filter-btn" hitSlop={10} style={[styles.filterBtn, nextSevenDaysOnly && { backgroundColor: C.accentSoft }]} onPress={() => setNextSevenDaysOnly((value) => !value)} accessibilityLabel="Show shifts in the next seven days">
+          <Ionicons name="filter" size={18} color={nextSevenDaysOnly ? C.accent : C.text} />
         </Pressable>
       </View>
       {loading ? (
@@ -250,8 +251,8 @@ export default function OpenShifts() {
                 <Text style={styles.bannerTitle}>New shifts are posted daily</Text>
                 <Text style={styles.bannerSub}>Check back often to grab the best opportunities.</Text>
               </View>
-              <Pressable testID="turn-on-alerts" hitSlop={8}>
-                <DeadText style={styles.bannerLink}>Turn on alerts</DeadText>
+              <Pressable testID="turn-on-alerts" hitSlop={8} onPress={() => router.push("/settings")}>
+                <Text style={styles.bannerLink}>Turn on alerts</Text>
               </Pressable>
             </View>
           )}

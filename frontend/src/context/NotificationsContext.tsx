@@ -21,10 +21,7 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!user) {
-      setUnreadCount(0);
-      return;
-    }
+    if (!user) return;
     try {
       const count = await fetchUnreadCount();
       setUnreadCount(count);
@@ -35,12 +32,9 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
 
   // Poll while the app is in the foreground
   useEffect(() => {
-    if (!user) {
-      setUnreadCount(0);
-      return;
-    }
+    if (!user) return;
 
-    refresh();
+    const initialRefresh = setTimeout(refresh, 0);
     intervalRef.current = setInterval(refresh, POLL_INTERVAL_MS);
 
     const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
@@ -50,13 +44,14 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     });
 
     return () => {
+      clearTimeout(initialRefresh);
       if (intervalRef.current) clearInterval(intervalRef.current);
       sub.remove();
     };
   }, [user, refresh]);
 
   return (
-    <NotificationsContext.Provider value={{ unreadCount, refresh }}>
+    <NotificationsContext.Provider value={{ unreadCount: user ? unreadCount : 0, refresh }}>
       {children}
     </NotificationsContext.Provider>
   );

@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, KeyboardAvoidingView, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
@@ -8,7 +8,7 @@ import { theme } from "@/src/theme";
 import { Button } from "@/src/ui";
 import { api } from "@/src/api/client";
 import { relativeTime } from "@/src/utils/format";
-import { tap as hapticTap, success as hapticSuccess } from "@/src/utils/haptics";
+import { success as hapticSuccess } from "@/src/utils/haptics";
 
 const TYPES = [
   { id: "incident", label: "Incident" },

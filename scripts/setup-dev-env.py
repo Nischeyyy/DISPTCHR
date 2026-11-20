@@ -4,6 +4,7 @@
 
 from pathlib import Path
 import argparse
+import base64
 import secrets
 import sys
 
@@ -62,13 +63,21 @@ control_panel_key = (
 )
 values["CONTROL_PANEL_API_KEY"] = control_panel_key
 values.setdefault("JWT_ALGORITHM", "HS256")
-values.setdefault("JWT_EXPIRE_HOURS", "168")
+values.setdefault("ACCESS_TOKEN_MINUTES", "15")
+values.setdefault("MANAGER_SESSION_HOURS", "8")
+values.setdefault("REFRESH_TOKEN_DAYS", "30")
+values.setdefault("APP_ENV", "development")
+values.setdefault("ALLOW_PUBLIC_REGISTRATION", "false")
+values.setdefault("SESSION_COOKIE_SECURE", "false")
+values.setdefault("CORS_ORIGINS", "http://127.0.0.1:5050,http://localhost:5050,http://127.0.0.1:3000,http://localhost:3000")
+if not values.get("PII_ENCRYPTION_KEY"):
+    values["PII_ENCRYPTION_KEY"] = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
 values.setdefault("SENDGRID_API_KEY", "")
 values.setdefault("SENDGRID_FROM_EMAIL", "")
 values.setdefault("TWILIO_ACCOUNT_SID", "")
 values.setdefault("TWILIO_AUTH_TOKEN", "")
 values.setdefault("TWILIO_FROM_NUMBER", "")
-values.setdefault("EMERGENT_PUSH_KEY", "")
+values.setdefault("EXPO_ACCESS_TOKEN", "")
 
 ordered_keys = [
     "MONGO_URL",
@@ -76,13 +85,20 @@ ordered_keys = [
     "JWT_SECRET",
     "CONTROL_PANEL_API_KEY",
     "JWT_ALGORITHM",
-    "JWT_EXPIRE_HOURS",
+    "ACCESS_TOKEN_MINUTES",
+    "MANAGER_SESSION_HOURS",
+    "REFRESH_TOKEN_DAYS",
+    "APP_ENV",
+    "ALLOW_PUBLIC_REGISTRATION",
+    "SESSION_COOKIE_SECURE",
+    "CORS_ORIGINS",
+    "PII_ENCRYPTION_KEY",
     "SENDGRID_API_KEY",
     "SENDGRID_FROM_EMAIL",
     "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "TWILIO_FROM_NUMBER",
-    "EMERGENT_PUSH_KEY",
+    "EXPO_ACCESS_TOKEN",
 ]
 
 contents = [
@@ -101,11 +117,14 @@ ENV_PATH.chmod(0o600)
 
 if PANEL_ENV_PATH.parent.is_dir():
     panel_values.setdefault("DISPTCHR_DEV_ACCESS", "1")
+    if not panel_values.get("PANEL_ENCRYPTION_KEY"):
+        panel_values["PANEL_ENCRYPTION_KEY"] = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
     panel_values.setdefault("DISPTCHR_CONTROL_API_URL", "http://127.0.0.1:8000/api")
     panel_values["DISPTCHR_CONTROL_API_KEY"] = control_panel_key
     panel_values.setdefault("DISPTCHR_MANAGER_PORTAL_URL", "http://127.0.0.1:5050/manager/")
     panel_ordered_keys = [
         "DISPTCHR_DEV_ACCESS",
+        "PANEL_ENCRYPTION_KEY",
         "DISPTCHR_CONTROL_API_URL",
         "DISPTCHR_CONTROL_API_KEY",
         "DISPTCHR_MANAGER_PORTAL_URL",

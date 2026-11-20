@@ -32,7 +32,7 @@ export default function ChangePassword() {
   const submit = async () => {
     setError(null);
     if (!currentPassword) { setError("Enter your current password"); return; }
-    if (newPassword.length < 6) { setError("New password must be at least 6 characters"); return; }
+    if (newPassword.length < 12) { setError("New password must be at least 12 characters"); return; }
     if (newPassword !== confirmPassword) { setError("New passwords do not match"); return; }
     setSubmitting(true);
     try {
@@ -80,7 +80,7 @@ export default function ChangePassword() {
               value={newPassword}
               onChangeText={setNewPassword}
               secureTextEntry
-              placeholder="At least 6 characters"
+              placeholder="At least 12 characters"
               placeholderTextColor={C.textTertiary}
               style={styles.input}
             />

@@ -3,6 +3,7 @@ export const MANAGER_PERMISSIONS = {
   sos: 'sos.manage',
   live: 'locations.view',
   guards: 'guards.manage',
+  'badge-verify': 'guards.manage',
   sites: 'sites.manage',
   shifts: 'scheduling.manage',
   'open-shifts': 'scheduling.manage',
@@ -16,9 +17,7 @@ export const MANAGER_PERMISSIONS = {
 
 export function hasManagerPermission(user, permission) {
   const assigned = user?.manager_permissions;
-  // Existing manager records created before access controls retain their current
-  // access until a director saves an explicit permission set.
-  return !Array.isArray(assigned) || assigned.includes(permission);
+  return Array.isArray(assigned) && assigned.includes(permission);
 }
 
 export function firstAllowedManagerPath(user) {

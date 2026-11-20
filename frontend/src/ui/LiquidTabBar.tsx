@@ -2,7 +2,12 @@ import React from "react";
 import { View, StyleSheet, Pressable, Platform } from "react-native";
 import * as Haptics from "expo-haptics";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
+
+type LiquidTabBarProps = {
+  state: { index: number; routes: Array<{ key: string; name: string }> };
+  descriptors: Record<string, { options: { tabBarIcon?: (props: { focused: boolean; color: string; size: number }) => React.ReactNode } }>;
+  navigateToTab: (routeKey: string) => void;
+};
 
 const tap = () => {
   if (Platform.OS === "web") return;
@@ -16,7 +21,7 @@ const tap = () => {
  * no moving indicator — just a floating black pill bar with white
  * (active) / gray (inactive) icons and labels.
  */
-export function LiquidTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
+export function LiquidTabBar({ state, descriptors, navigateToTab }: LiquidTabBarProps) {
   const insets = useSafeAreaInsets();
 
   return (
@@ -27,10 +32,9 @@ export function LiquidTabBar({ state, descriptors, navigation }: BottomTabBarPro
             const { options } = descriptors[route.key];
             const focused = state.index === index;
             const onPress = () => {
-              const event = navigation.emit({ type: "tabPress", target: route.key, canPreventDefault: true });
-              if (!focused && !event.defaultPrevented) {
+              if (!focused) {
                 tap();
-                navigation.navigate(route.name);
+                navigateToTab(route.key);
               }
             };
             const icon = options.tabBarIcon

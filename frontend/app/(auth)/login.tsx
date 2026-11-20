@@ -11,9 +11,8 @@ import {
   Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
 import { useAuth } from "@/src/auth/AuthContext";
-import { DeadText } from "@/src/components/DeadButton";
+import { api } from "@/src/api/client";
 
 // ── Light-theme palette (auth screens only) ───────────────────────────────────
 const W = {
@@ -28,11 +27,29 @@ const W = {
 
 export default function Login() {
   const { login, sessionExpired, clearSessionExpired } = useAuth();
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
+
+  const requestPasswordReset = async () => {
+    setError(null);
+    setResetMessage(null);
+    if (!email.trim()) {
+      setError("Enter your work email first.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await api('/auth/forgot-password', { method: 'POST', body: { email: email.trim() }, auth: false });
+      setResetMessage("If that address is registered, a password-reset link has been emailed.");
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const submit = async () => {
     setError(null);
@@ -109,12 +126,13 @@ export default function Login() {
                 placeholderTextColor={W.textTertiary}
                 style={styles.input}
               />
-              <Pressable style={styles.forgotWrap} onPress={() => {}}>
-                <DeadText style={styles.forgotText}>Forgot Password?</DeadText>
+              <Pressable style={styles.forgotWrap} onPress={requestPasswordReset} disabled={loading}>
+                <Text style={styles.forgotText}>Forgot Password?</Text>
               </Pressable>
             </View>
 
             {error && <Text style={styles.error}>{error}</Text>}
+            {resetMessage && <Text style={styles.resetMessage}>{resetMessage}</Text>}
           </View>
 
           {/* ── Sign In button ── */}
@@ -133,16 +151,10 @@ export default function Login() {
             </Text>
           </Pressable>
 
-          {/* ── Onboarding link ── */}
+          {/* Accounts are provisioned by an authorized manager. */}
           <View style={styles.footer}>
             <View style={styles.divider} />
-            <Text style={styles.footerLabel}>Don't have an account?</Text>
-            <Pressable
-              testID="go-to-register-link"
-              onPress={() => router.push("/(auth)/register")}
-            >
-              <Text style={styles.footerLink}>Create Employee Account →</Text>
-            </Pressable>
+            <Text style={styles.footerLabel}>Need an account? Contact your Skyhawk manager.</Text>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -214,6 +226,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
     textAlign: "center",
   },
+  resetMessage: { color: "#207A3E", fontSize: 13, marginTop: 8, textAlign: "center" },
 
   // Sign In button — black, monochrome
   signInBtn: {

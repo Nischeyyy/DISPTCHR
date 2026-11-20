@@ -406,7 +406,7 @@ export default function Guards() {
               </div>
               <div>
                 <label className="label">{modal === 'create' ? 'Password' : 'New Password (leave blank to keep)'}</label>
-                <input type="password" className="input" value={form.password} onChange={e => setForm(f => ({...f, password: e.target.value}))} required={modal === 'create'} />
+                <input type="password" className="input" value={form.password} onChange={e => setForm(f => ({...f, password: e.target.value}))} required={modal === 'create'} minLength={12} maxLength={128} />
               </div>
               <div>
                 <label className="label">Employee #</label>

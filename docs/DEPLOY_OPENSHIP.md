@@ -1,115 +1,79 @@
-# Deploying DISPTCHR with Openship
+# Production deployment
 
-Openship is the deployment/hosting layer for DISPTCHR. It reads `docker-compose.yml` at the
-repo root (declared in `openship.json`) and runs the whole stack — API, both web frontends,
-the edge router and MongoDB — as one project with one public hostname.
+DISPTCHR deploys from `docker-compose.yml`. Openship may orchestrate the Compose project, but the topology does not depend on an Openship-specific database or filesystem.
 
-```
-                 https://your-domain            (TLS terminated by Openship)
-                          │
-                       ┌──▼──┐
-                       │edge │  nginx router — the ONLY public service
-                       └──┬──┘
-      ┌───────────────────┼─────────────────────┐
-  /api /uploads       /manager/*                 /*
-      ▼                   ▼                      ▼
-   ┌─────┐         ┌───────────────┐       ┌───────────┐
-   │ api │         │manager-portal │       │ guard-web │
-   │:8001│         │  (Vite dist)  │       │(Expo web) │
-   └──┬──┘         └───────────────┘       └───────────┘
-      ▼
-   ┌─────┐
-   │mongo│  (or MongoDB Atlas — see below)
-   └─────┘
+```text
+Public HTTPS hostname
+        |
+        v
+edge (only public service)
+  |-- /api/*      -> FastAPI API
+  `-- /manager/*  -> Manager Portal
+
+FastAPI API + notification worker
+  |-- managed MongoDB with backups and point-in-time recovery
+  |-- managed Redis for shared rate limits
+  `-- private S3-compatible object storage
+
+Guard application -> same public /api endpoint from native iOS/Android builds
+Disptchr Panel -> /api/control/* over its server-only control connection
 ```
 
-Because every request enters through `edge` on one hostname, both frontends call the API at
-the relative path `/api` — no CORS, no hard-coded backend URLs in the web builds.
+The guard application is native. There is no production `guard-web` service and no public uploads directory. Files are private and retrieved only through authenticated, short-lived access tokens.
 
 ## Services
 
-| Service          | Source                          | Port | Visibility | Notes |
-|------------------|---------------------------------|------|------------|-------|
-| `edge`           | `deploy/edge/`                  | 80   | **Public** | Routes by path prefix; `/healthz` for uptime checks |
-| `api`            | `backend/Dockerfile`            | 8001 | Internal   | FastAPI; `/api/health`; `uploads` volume |
-| `manager-portal` | `manager-portal/Dockerfile`     | 80   | Internal   | Served under `/manager/` (matches `vite.config.js` base) |
-| `guard-web`      | `frontend/Dockerfile.web`       | 80   | Internal   | `expo export --platform web`, SPA fallback |
-| `mongo`          | `mongo:7`                       | 27017| Internal   | `mongo-data` volume; disable if using Atlas |
+| Service | Public | Responsibility |
+| --- | --- | --- |
+| `edge` | yes | single ingress and path routing |
+| `api` | no | authentication, authorization, workforce operations, health and metrics |
+| `manager-portal` | no | static manager website served under `/manager/` |
+| `notification-worker` | no | durable email, SMS, and Expo push delivery |
 
-## First deployment
+Disptchr Panel is deployed from the separate `Nischeyyy/disptchr-panel` repository and connects to the API with a server-only key.
 
-1. **Connect GitHub** — Openship → Settings → Git → connect, granting access to `Nischeyyy/DISPTCHR`.
-2. **New project** → Library → Repositories → pick `DISPTCHR`. Openship detects `docker-compose.yml`
-   via `openship.json` and lists the five services above.
-3. **Choose where it runs** — *Your server* (VPS over SSH, Docker) is the recommended target for
-   production because it supports persistent volumes. See *Openship Cloud* note below.
-4. **Set environment variables** on the **`api`** service (Services → api → Environment):
+## Required production configuration
 
-   | Key | Required | Value |
-   |-----|----------|-------|
-   | `JWT_SECRET` | **Yes** | `openssl rand -hex 32` — mark as secret |
-   | `MONGO_URL` | No | Defaults to `mongodb://mongo:27017`. For Atlas set `mongodb+srv://…` (secret) |
-   | `DB_NAME` | No | Defaults to `disptchr` |
-   | `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL` | No | Enables email (password-reset delivery, alerts) |
-   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | No | Enables SMS |
-   | `EMERGENT_PUSH_KEY` | No | Push notifications provider key |
+The API deliberately refuses to start when a required control is missing.
 
-   The API refuses to start with a clear error if `JWT_SECRET` is missing — it never falls back to a default.
-5. **Routing** — make sure only `edge` is **Publicly exposed**; leave the other four **Internal**.
-6. Press **Deploy**. When the build finishes:
-   - Guard web app → `https://<domain>/`
-   - Manager portal → `https://<domain>/manager/`
-   - API docs → `https://<domain>/docs`
-   - Health → `https://<domain>/healthz` and `https://<domain>/api/health`
-7. **Custom domain** — Project → Domains → add `app.yourcompany.com`; Openship verifies DNS and issues TLS.
-8. **Auto-deploy** — Project → Source → enable *Auto-deploy* so every push to the deploy branch redeploys.
+- `APP_ENV=production`
+- `MONGO_URL` and `DB_NAME`
+- `JWT_SECRET` with at least 32 random characters
+- valid `PII_ENCRYPTION_KEY` (Fernet key)
+- `CONTROL_PANEL_API_KEY` shared only with Disptchr Panel
+- `METRICS_TOKEN`
+- `CORS_ORIGINS` containing only the exact HTTPS application origins
+- non-memory `RATE_LIMIT_STORAGE_URI` pointing to managed Redis
+- `STORAGE_BACKEND=s3`, `S3_BUCKET`, region/endpoint as applicable, and workload identity or S3 credentials
+- SendGrid key and verified sender
+- Twilio account, token, and sender number
+- optional `SENTRY_DSN` and `EXPO_ACCESS_TOKEN`
 
-CLI equivalent:
+Use the deployment platform's secret store. Never place real values in Git, build arguments, screenshots, or support messages. Rotate any credential that has ever been pasted into a chat or terminal transcript before production use.
 
-```bash
-openship project create --name disptchr --git-owner Nischeyyy --git-repo DISPTCHR
-openship service env set --project disptchr api JWT_SECRET=$(openssl rand -hex 32) --secret
-openship deploy
-openship project git auto-deploy disptchr --enable
-```
+## Release procedure
 
-## MongoDB: bundled vs Atlas
+1. Complete every local gate in `docs/PRODUCTION_READINESS.md` on the exact commit to deploy.
+2. Rotate exposed credentials and create separate staging and production values.
+3. Provision managed MongoDB, Redis, private object storage, notification providers, monitoring, and backups.
+4. Set all variables for both `api` and `notification-worker`. Keep only `edge` public.
+5. Deploy to staging and verify `/internal/live`, `/api/health`, authenticated manager login/MFA, control-panel health, file upload/download, one notification per channel, and worker heartbeat.
+6. Restore a backup into an isolated environment and record the result.
+7. Run the smoke/load/security test plan, then promote the same image digests to production.
+8. Configure DNS/TLS, CDN/WAF/rate policies, uptime checks, log retention, and alert escalation.
 
-- **Bundled (`mongo` service)** — zero config, data in the `mongo-data` volume. Turn on the service's
-  **Backup** tab. Good for staging and small single-tenant deployments.
-- **MongoDB Atlas** — set `MONGO_URL` on `api` to your `mongodb+srv://` string, then open the
-  `mongo` service → Settings → **Disable Service**. Allow the server's IP in Atlas Network Access.
+## Native guard releases
 
-## Persistent data
+Bind `frontend/` to the company EAS project and set `EXPO_PUBLIC_BACKEND_URL` to the public HTTPS origin. Build signed iOS and Android artifacts with company-owned Apple/Google credentials. Validate push entitlement, deep links, camera/location permissions, background location behavior, and store privacy declarations on physical devices before submission.
 
-Two named volumes must survive redeploys:
+## Health and observability
 
-- `uploads` → `/app/uploads` on `api` (incident photos, documents, generated pay stubs — payroll retention)
-- `mongo-data` → `/data/db` on `mongo`
+- `/internal/live` proves the API process is alive.
+- `/api/health` proves MongoDB and private object storage are reachable.
+- the notification worker health check fails when its heartbeat is more than 60 seconds old.
+- `/internal/metrics` is hidden unless the correct metrics token is supplied.
+- request logs are structured and include an `X-Request-ID`; Sentry is supported when configured.
 
-On a self-hosted server these are real Docker volumes. **Openship Cloud has no volume primitive** — if you
-deploy there, use Atlas for the database and plan to move uploads to object storage (S3/R2) before
-production use.
+## Rollback and recovery
 
-## Mobile builds
-
-`guard-web` is the browser build of the Expo app. Native iOS/Android binaries are built separately; point
-them at the deployed API by setting `EXPO_PUBLIC_BACKEND_URL=https://<domain>` at build time (the API
-client appends `/api`).
-
-## Running the same stack locally
-
-```bash
-cp .env.example .env         # set JWT_SECRET
-docker compose up --build    # http://localhost:<edge port>  (docker compose port edge 80)
-```
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| `api` exits: `Required environment variable 'JWT_SECRET' is not set` | Set it on the api service → Environment, redeploy |
-| `api` unhealthy, logs show `ServerSelectionTimeoutError` | `MONGO_URL` wrong, `mongo` disabled without Atlas configured, or Atlas IP allow-list |
-| `/manager/` returns the guard app | `edge` couldn't reach `manager-portal`; check that service is Running |
-| Uploads vanish after redeploy | `uploads` volume missing (Openship Cloud) — use object storage |
-| `guard-web` build fails at `yarn install` | Ensure `frontend/yarn.lock` has no `package-firewall.replit.local` URLs |
+Deploy immutable image tags and retain the previous known-good tag. Application rollback must never roll back data blindly. Schema/data changes require a tested forward repair or an explicitly tested restore. MongoDB backups, object versions, and PostgreSQL backups for Disptchr Panel must have documented retention, encryption, restore ownership, RPO, and RTO.

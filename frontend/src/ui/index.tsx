@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated, Platform } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '../theme';
@@ -9,7 +9,7 @@ function tap() {
 }
 
 export function Button({ label, onPress, variant = 'primary', disabled, style, testID, small, leading }: any) {
-  const scale = useRef(new Animated.Value(1)).current;
+  const [scale] = useState(() => new Animated.Value(1));
   const isPrimary = variant === 'primary';
   const bg = isPrimary ? theme.colors.accent : 'transparent';
   const color = isPrimary ? theme.colors.onAccent : (variant === 'link' ? theme.colors.accent : theme.colors.text);

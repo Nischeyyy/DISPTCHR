@@ -1,16 +1,16 @@
 {
   "expo": {
-    "name": "disptchr",
+    "name": "Disptchr Guard",
     "slug": "disptchr",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "disptchr",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.opsclockin.eakz76",
+      "bundleIdentifier": "com.skyhawksecurity.disptchr.guard",
+      "buildNumber": "1",
       "infoPlist": {
         "NSCameraUsageDescription": "Verify identity with selfie at clock-in",
         "NSLocationWhenInUseUsageDescription": "Verify shift location at clock-in",
@@ -50,13 +50,12 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"
       },
-      "edgeToEdgeEnabled": true,
-      "package": "com.emergent.opsclockin.eakz76",
+      "package": "com.skyhawksecurity.disptchr.guard",
+      "versionCode": 1,
       "permissions": [
         "CAMERA",
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION",
-        "READ_EXTERNAL_STORAGE"
+        "ACCESS_COARSE_LOCATION"
       ]
     },
     "web": {
@@ -93,10 +92,16 @@
           "photosPermission": "Attach photos to incident reports"
         }
       ],
-      "expo-notifications"
+      "expo-notifications",
+      "expo-font",
+      "expo-image",
+      "expo-secure-store",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "owner": "skyhawksecurity"
   }
 }
