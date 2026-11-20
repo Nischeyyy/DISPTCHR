@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -40,6 +40,13 @@ def test_password_hashing_supports_long_unicode_and_legacy_bcrypt_hashes():
     assert server.verify_password(password + "x", hashed) is False
     legacy = server.bcrypt.hashpw(b"legacy-password", server.bcrypt.gensalt()).decode()
     assert server.verify_password("legacy-password", legacy) is True
+
+
+def test_date_only_credential_expiry_is_normalized_to_utc():
+    future = (datetime.now(timezone.utc) + timedelta(days=90)).date().isoformat()
+    parsed = server.parse_datetime_utc(future)
+    assert parsed.tzinfo == timezone.utc
+    assert server._compliance_status(future) == "valid"
 
 
 def test_manager_totp_matches_rfc_vector_and_sensitive_fields_are_removed():

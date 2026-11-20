@@ -1,6 +1,7 @@
 """Skyhawk Security Operations - Backend API
 JWT-based authentication, shift management, time clock, wallet, incidents, payroll, announcements.
 """
+import asyncio
 import io
 import re
 import os
@@ -204,6 +205,14 @@ def iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
+
+
+def parse_datetime_utc(value: str) -> datetime:
+    """Parse ISO dates or datetimes and always return an aware UTC datetime."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def hash_password(pw: str) -> str:
@@ -1309,7 +1318,7 @@ async def dashboard(request: Request, user=Depends(get_current_user)):
     # Licence expiry
     licence_days_remaining = None
     if user.get("licence_expiry"):
-        expiry = datetime.fromisoformat(user["licence_expiry"].replace("Z", "+00:00"))
+        expiry = parse_datetime_utc(user["licence_expiry"])
         licence_days_remaining = (expiry - now).days
 
     return {
@@ -3462,7 +3471,7 @@ async def payroll_stub(period_id: str, user=Depends(get_current_user)):
 
 def _compliance_status(expiry_iso: str) -> str:
     try:
-        expiry_dt = datetime.fromisoformat(expiry_iso.replace("Z", "+00:00"))
+        expiry_dt = parse_datetime_utc(expiry_iso)
         days_left = (expiry_dt - now_utc()).days
         if days_left < 0:
             return "expired"
@@ -3482,7 +3491,7 @@ async def my_compliance(user=Depends(get_current_user)):
         if doc.get("expiry"):
             doc["compliance_status"] = _compliance_status(doc["expiry"])
             try:
-                doc["days_until_expiry"] = (datetime.fromisoformat(doc["expiry"].replace("Z", "+00:00")) - now_utc()).days
+                doc["days_until_expiry"] = (parse_datetime_utc(doc["expiry"]) - now_utc()).days
             except Exception:
                 doc["days_until_expiry"] = None
     expired = [d for d in docs if d.get("compliance_status") == "expired"]

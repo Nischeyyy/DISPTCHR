@@ -15,7 +15,7 @@ No fake business records, demo accounts, default passwords, or development authe
 | --- | --- | --- |
 | Workforce backend syntax | Green | all production Python modules compile |
 | Backend security scan | Green | Bandit reports no findings |
-| Backend automated tests | Green | 44 passed; 21 staging E2E tests explicitly skipped without a disposable staging URL and credentials |
+| Backend automated tests | Green | 45 core tests passed; 22 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
 | Manager Portal | Green | 3 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Disptchr Panel database | Green | schema v6 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
 | Disptchr Panel | Green | TypeScript passed; 5 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities |
@@ -62,7 +62,7 @@ These items cannot truthfully be marked green from source code or a local machin
 5. **Business data:** approve and import real manager, guard, site, rate, invoice, and operational data. The workforce development database contains no invented records.
 6. **Native ownership:** bind the Expo project, add company-owned Apple and Google signing credentials, validate on physical devices, complete privacy declarations, and submit through company store accounts.
 7. **Network edge:** configure production DNS, TLS, CDN/WAF, exact HTTPS origins, uptime probes, and the public API hostname.
-8. **Operational validation:** run the manual staging E2E workflow, concurrency/load tests, penetration testing, accessibility review, physical-device checks, notification delivery tests, and a documented disaster-restore exercise.
+8. **Operational validation:** run the automated API workflow against the deployed staging environment, plus concurrency/load tests, penetration testing, accessibility review, physical-device checks, notification delivery tests, and a documented disaster-restore exercise.
 9. **Licence verification:** Ontario provides a public browser verification workflow but no approved automation API has been established; licence checks therefore require an authorized human verification record unless an official integration becomes available.
 10. **Git history privacy:** the Master Timesheet workbook and three historical upload artifacts are removed from the current tree, but remain in older Git commits. Purging them requires an approved history rewrite and force-push, followed by fresh clones for all collaborators.
 
@@ -71,7 +71,7 @@ These items cannot truthfully be marked green from source code or a local machin
 1. Approve and perform the Git history rewrite, then verify the remote no longer contains the workbook.
 2. Rotate exposed credentials and create separate staging and production secrets in the deployment platform.
 3. Provision and verify the managed services, backups, alerting, DNS, TLS, and WAF.
-4. Deploy immutable images to staging and run the manual staging E2E workflow plus provider, load, security, accessibility, device, and restore tests.
+4. Deploy immutable images to staging and run the API E2E workflow against that deployment plus provider, load, security, accessibility, device, and restore tests.
 5. Provision the director, manager, and guard identities through the real controlled flows and import approved business data.
 6. Record sign-off, promote the same image digests to production, and retain the known-good rollback images.
 

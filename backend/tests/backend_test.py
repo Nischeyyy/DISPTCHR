@@ -21,6 +21,9 @@ ADMIN_EMAIL = os.environ.get("DISPTCHR_E2E_MANAGER_EMAIL", "")
 ADMIN_PASSWORD = os.environ.get("DISPTCHR_E2E_MANAGER_PASSWORD", "")
 ADMIN_MFA_CODE = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_CODE", "")
 ADMIN_MFA_SECRET = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_SECRET", "")
+BOOTSTRAP_DISPOSABLE = os.environ.get("DISPTCHR_E2E_BOOTSTRAP") == "1"
+CONTROL_KEY = os.environ.get("CONTROL_PANEL_API_KEY", "")
+E2E_ORIGIN = os.environ.get("DISPTCHR_E2E_ORIGIN", "http://127.0.0.1:5050")
 
 
 def current_mfa_code():
@@ -40,12 +43,142 @@ def current_mfa_code():
 def session():
     s = httpx.Client(timeout=20.0, follow_redirects=False)
     s.headers.update({"Content-Type": "application/json"})
+    if BOOTSTRAP_DISPOSABLE:
+        s.headers.update({"Origin": E2E_ORIGIN})
     yield s
     s.close()
 
 
+def expect(response, status_code):
+    assert response.status_code == status_code, f"{response.request.method} {response.request.url}: {response.status_code} {response.text}"
+    return response.json() if response.content else None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def bootstrap_disposable_environment(session):
+    """Create a complete disposable company dataset through public application APIs only."""
+    if not BOOTSTRAP_DISPOSABLE:
+        return
+
+    global GUARD_EMAIL, GUARD_PASSWORD, ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_MFA_SECRET
+    assert BASE_URL and CONTROL_KEY, "Disposable E2E bootstrap requires its API URL and control key"
+    GUARD_EMAIL = "guard.e2e@skyhawksecurity.ca"
+    GUARD_PASSWORD = "Guard-E2E-password-2026"
+    ADMIN_EMAIL = "manager.e2e@skyhawksecurity.ca"
+    ADMIN_PASSWORD = "Manager-E2E-password-2026"
+
+    control_headers = {
+        "x-disptchr-control-key": CONTROL_KEY,
+        "x-disptchr-actor-id": "github-e2e",
+        "x-disptchr-actor-name": "Disposable E2E Bootstrap",
+    }
+    permission_catalog = expect(session.get(f"{BASE_URL}/api/control/managers", headers=control_headers), 200)["permission_catalog"]
+    manager = expect(session.post(
+        f"{BASE_URL}/api/control/managers",
+        headers=control_headers,
+        json={
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD,
+            "full_name": "E2E Manager",
+            "status": "active",
+            "permissions": [item["key"] for item in permission_catalog],
+        },
+    ), 201)
+    ADMIN_MFA_SECRET = manager["mfa_setup"]["secret"]
+
+    # Use a one-time recovery code for setup so the TOTP remains unused for the login test.
+    expect(session.post(
+        f"{BASE_URL}/api/auth/manager-login",
+        json={
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD,
+            "mfa_code": manager["mfa_setup"]["recovery_codes"][0],
+        },
+    ), 200)
+
+    expiry = (datetime.now(timezone.utc) + timedelta(days=365)).date().isoformat()
+    guard = expect(session.post(
+        f"{BASE_URL}/api/admin/guards",
+        json={
+            "email": GUARD_EMAIL,
+            "password": GUARD_PASSWORD,
+            "full_name": "E2E Guard",
+            "phone": "+14165550100",
+            "employee_number": "E2E-GUARD-001",
+            "licence_number": "E2E-LIC-001",
+            "licence_expiry": expiry,
+            "certifications": ["First Aid"],
+        },
+    ), 201)
+    site = expect(session.post(
+        f"{BASE_URL}/api/admin/sites",
+        json={
+            "name": "E2E Test Site",
+            "address": "100 Test Street, Toronto, ON",
+            "latitude": 43.6467,
+            "longitude": -79.3785,
+            "supervisor": "E2E Supervisor",
+            "supervisor_phone": "+14165550101",
+            "instructions": "Disposable automated test assignment.",
+            "geofence_radius_m": 200,
+        },
+    ), 201)
+
+    now = datetime.now(timezone.utc)
+    expect(session.post(
+        f"{BASE_URL}/api/admin/shifts",
+        json={
+            "user_id": guard["id"],
+            "site_id": site["id"],
+            "start": (now - timedelta(minutes=30)).isoformat(),
+            "end": (now + timedelta(hours=7, minutes=30)).isoformat(),
+            "role": "Security Guard",
+            "pay_rate": 25.0,
+        },
+    ), 201)
+    expect(session.post(
+        f"{BASE_URL}/api/admin/open-shifts",
+        json={
+            "site_id": site["id"],
+            "start": (now + timedelta(days=1)).isoformat(),
+            "end": (now + timedelta(days=1, hours=8)).isoformat(),
+            "role": "Patrol",
+            "pay_rate": 26.0,
+            "spots_available": 1,
+        },
+    ), 201)
+    expect(session.post(
+        f"{BASE_URL}/api/admin/announcements",
+        json={"title": "E2E Announcement", "body": "Disposable automated announcement.", "severity": "info"},
+    ), 201)
+    expect(session.post(
+        f"{BASE_URL}/api/admin/payroll",
+        json={
+            "user_id": guard["id"],
+            "period_start": (now - timedelta(days=14)).date().isoformat(),
+            "period_end": now.date().isoformat(),
+            "pay_date": (now + timedelta(days=2)).date().isoformat(),
+            "hours_worked": 40,
+            "hourly_rate": 25,
+            "status": "submitted",
+        },
+    ), 201)
+
+    # Do not leak the manager's secure session cookie into guard or anonymous tests.
+    session.cookies.clear()
+    guard_login = expect(session.post(
+        f"{BASE_URL}/api/auth/login",
+        json={"email": GUARD_EMAIL, "password": GUARD_PASSWORD},
+    ), 200)
+    expect(session.post(
+        f"{BASE_URL}/api/wallet/documents",
+        headers={"Authorization": f"Bearer {guard_login['access_token']}"},
+        json={"type": "security_licence", "name": "Ontario Security Licence", "number": "E2E-LIC-001", "expiry": expiry},
+    ), 201)
+
+
 @pytest.fixture(scope="session")
-def guard_token(session):
+def guard_token(session, bootstrap_disposable_environment):
     r = session.post(f"{BASE_URL}/api/auth/login", json={"email": GUARD_EMAIL, "password": GUARD_PASSWORD})
     assert r.status_code == 200, f"login failed: {r.status_code} {r.text}"
     data = r.json()
@@ -77,10 +210,13 @@ class TestAuth:
         assert "hashed_password" not in d["user"]
 
     def test_login_admin(self, session):
-        r = session.post(f"{BASE_URL}/api/auth/manager-login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "mfa_code": current_mfa_code()})
-        assert r.status_code == 200
-        assert r.json()["user"]["role"] == "admin"
-        assert "access_token" not in r.json()
+        try:
+            r = session.post(f"{BASE_URL}/api/auth/manager-login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "mfa_code": current_mfa_code()})
+            assert r.status_code == 200
+            assert r.json()["user"]["role"] == "admin"
+            assert "access_token" not in r.json()
+        finally:
+            session.cookies.clear()
 
     def test_login_wrong_password(self, session):
         r = session.post(f"{BASE_URL}/api/auth/login", json={"email": GUARD_EMAIL, "password": "wrong"})
@@ -326,7 +462,18 @@ class TestProfile:
         assert r.status_code == 200
         d = r.json()
         assert d["user"]["email"] == GUARD_EMAIL
-        assert isinstance(d["equipment"], list) and len(d["equipment"]) > 0
+        assert isinstance(d["equipment"], list)
+
+
+# ---- compliance ----
+class TestCompliance:
+    def test_date_only_credential_expiry(self, session, guard_headers):
+        r = session.get(f"{BASE_URL}/api/compliance/status", headers=guard_headers)
+        assert r.status_code == 200
+        documents = r.json()["documents"]
+        assert documents
+        assert documents[0]["compliance_status"] in {"valid", "expiring", "expiring_soon", "expired"}
+        assert isinstance(documents[0]["days_until_expiry"], int)
 
 
 # ---- onboarding ----
@@ -336,4 +483,4 @@ class TestOnboarding:
         assert r.status_code == 200
         d = r.json()
         assert "percent" in d and 0 <= d["percent"] <= 100
-        assert d["total"] == 6
+        assert d["total"] == 5

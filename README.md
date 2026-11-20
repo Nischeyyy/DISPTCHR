@@ -44,6 +44,8 @@ npx expo export --platform ios
 npx expo export --platform android
 ```
 
+CI also starts the real FastAPI service with a fresh disposable MongoDB database and runs the complete API workflow in `backend/tests/backend_test.py`. The workflow creates its manager, MFA enrollment, guard, site, shifts, payroll, credential, and announcement through application APIs, exercises the guard operations, and discards the database after the run.
+
 See `docs/PRODUCTION_READINESS.md` for the release checklist and `docs/DEPLOY_OPENSHIP.md` for deployment topology and required external services.
 
 ## Production dependencies
