@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "date-fns": "^3.6.0",
+    "date-fns": "^4.4.0",
     "html5-qrcode": "^2.3.8",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
