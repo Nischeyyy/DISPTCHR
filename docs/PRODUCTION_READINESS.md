@@ -17,7 +17,7 @@ No fake business records, demo accounts, default passwords, or development authe
 | Backend security scan | Green | Bandit reports no findings; the production Python dependency audit reports 0 known vulnerabilities |
 | Backend automated tests | Green | 49 core tests passed; 25 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
 | Manager Portal | Green | 12 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
-| Disptchr Panel database | Green | schema v6 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
+| Disptchr Panel database | Green | schema v8 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
 | Disptchr Panel | Green | TypeScript passed; 5 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Guard application | Green | lint and TypeScript passed; Expo Doctor 20/20; dependency audit reports 0 vulnerabilities |
 | Native bundles | Green | production-style Expo exports completed for iOS and Android |
@@ -54,9 +54,11 @@ No fake business records, demo accounts, default passwords, or development authe
 ### Directors' Disptchr Panel
 
 - Master Timesheet import preserves immutable source rows, provenance, row numbers, modified time, SHA-256 fingerprint, and searchable normalized records.
-- Client and subcontractor invoices include line items, integrity validation, lifecycle state, audit history, and generated PDF output.
+- Client and subcontractor invoices include editable drafts, line items, integrity validation, enforced forward-only lifecycle transitions, immutable paid/void states, audit history, and generated PDF output.
 - Reconciliation covers selected periods, trailing biweekly totals, YTD totals, client and subcontractor comparisons, duplicates, missing or extreme hours, unmatched accounts, and invoice line/total integrity.
-- Documents support folders, uploads, versions, private downloads, and controlled deletion.
+- Documents support folders, uploads, versions, private downloads, folder moves, and a recoverable audited archive. Official generated/imported records are protected from archival, and archived uploads can be reviewed and restored without destroying their file data.
+- Audit cases enforce forward-only review/resolution/closure, cannot close with open findings, and lock findings after resolution so concluded evidence cannot be rewritten.
+- Record imports are content-fingerprinted per destination to prevent accidental duplicate ingestion, preserve their source artifact, report invalid rows, and leave summary-only invoice imports in an editable draft state until line integrity is established.
 - Spreadsheet Studio, saved workbooks, `.xlsx` exports, report builder, complete PDF reports, audit cases, findings, evidence, activity export, letterhead generation, licensing records, and record import are database-backed and audited.
 - Employment Package creates and stores six separate PDFs: employment summary/acceptance, employee information, direct-deposit authorization, emergency contact, policy/confidentiality, and licence/work eligibility.
 
