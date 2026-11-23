@@ -3,6 +3,7 @@ import { api } from '../api/client.js';
 import PageHeader from '../components/PageHeader.jsx';
 import Badge from '../components/Badge.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { ShieldCheck, AlertTriangle, Search } from 'lucide-react';
 import { format, parseISO, differenceInDays } from 'date-fns';
 
@@ -17,27 +18,27 @@ function licenceStatus(expiry) {
 export default function Compliance() {
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
 
-  useEffect(() => {
-    // Compliance endpoint may return guards with compliance info, or we build from guards list
-    Promise.all([api.guards()])
-      .then(([gd]) => {
-        const guards = gd.guards || [];
-        setRecords(guards.map(g => ({
-          ...g,
-          licence_status: licenceStatus(g.licence_expiry),
-        })));
-        setLoading(false);
-      })
-      .catch(() => {
-        // Fallback: try compliance endpoint
-        api.compliance()
-          .then(d => { setRecords(d.records || d.guards || []); setLoading(false); })
-          .catch(() => setLoading(false));
-      });
-  }, []);
+  async function load() {
+    try {
+      const data = await api.compliance();
+      const rows = data.records || data.guards || [];
+      setRecords(rows.map(record => ({
+        ...record,
+        licence_status: record.licence_status || licenceStatus(record.licence_expiry),
+      })));
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason?.message || 'Compliance records could not be loaded.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
 
   const statusCount = records.reduce((acc, r) => {
     acc[r.licence_status] = (acc[r.licence_status] || 0) + 1;
@@ -90,7 +91,9 @@ export default function Compliance() {
         </div>
       )}
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !filtered.length ? <EmptyState icon={ShieldCheck} title="No records found" /> : (
           <div className="card p-0 overflow-hidden">
             <div className="overflow-x-auto">

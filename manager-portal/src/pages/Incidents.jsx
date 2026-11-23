@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader.jsx';
 import Badge from '../components/Badge.jsx';
 import Modal from '../components/Modal.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { FileText, Eye } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 
@@ -12,18 +13,21 @@ const STATUSES = ['submitted', 'under_review', 'resolved', 'closed'];
 
 export default function Incidents() {
   const [incidents, setIncidents] = useState([]);
-  const [guards, setGuards] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('');
   const [viewModal, setViewModal] = useState(null);
   const [statusUpdate, setStatusUpdate] = useState('');
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
-    const [id, gd] = await Promise.all([api.incidents(filter ? `?status=${filter}` : ''), api.guards()]);
-    setIncidents(id.incidents || []);
-    setGuards(gd.guards || []);
-    setLoading(false);
+    try {
+      const id = await api.incidents(filter ? `?status=${filter}` : '');
+      setIncidents(id.incidents || []);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason.message || 'Unable to load incidents.');
+    } finally { setLoading(false); }
   }
   useEffect(() => { setLoading(true); load(); }, [filter]);
   useAutoRefresh(load, 30_000); // guards file incidents in real time
@@ -42,8 +46,6 @@ export default function Incidents() {
     } catch (err) { alert(err.message); } finally { setSaving(false); }
   }
 
-  const guardMap = Object.fromEntries(guards.map(g => [g.id, g]));
-
   return (
     <div>
       <PageHeader title="Incidents" subtitle="Review and manage incident reports" />
@@ -57,7 +59,9 @@ export default function Incidents() {
         ))}
       </div>
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !incidents.length ? <EmptyState icon={FileText} title="No incidents found" /> : (
           <div className="card p-0 overflow-hidden">
             <div className="overflow-x-auto">
@@ -69,7 +73,7 @@ export default function Incidents() {
                   {incidents.map(inc => (
                     <tr key={inc.id} className="hover:bg-gray-50/50 transition-colors">
                       <td className="table-cell">
-                        <p className="text-gray-900 text-sm font-medium">{guardMap[inc.user_id]?.full_name || '—'}</p>
+                        <p className="text-gray-900 text-sm font-medium">{inc.user_name || inc.user_id || '—'}</p>
                       </td>
                       <td className="table-cell text-xs text-gray-500 capitalize">{inc.type?.replace(/_/g, ' ')}</td>
                       <td className="table-cell text-sm font-medium text-gray-700">{inc.title || '—'}</td>
@@ -93,7 +97,7 @@ export default function Incidents() {
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
                 <p className="text-gray-500 text-xs mb-1 uppercase tracking-wider font-semibold">Guard</p>
-                <p className="text-gray-900 font-bold">{guardMap[viewModal.user_id]?.full_name || viewModal.user_id}</p>
+                <p className="text-gray-900 font-bold">{viewModal.user_name || viewModal.user_id}</p>
               </div>
               <div className="bg-gray-50 border border-gray-100 rounded-xl p-4">
                 <p className="text-gray-500 text-xs mb-1 uppercase tracking-wider font-semibold">Type</p>

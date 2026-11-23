@@ -5,25 +5,27 @@ import PageHeader from '../components/PageHeader.jsx';
 import Badge from '../components/Badge.jsx';
 import Modal from '../components/Modal.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { Clock, Edit2, Search } from 'lucide-react';
 import { format, parseISO, differenceInMinutes } from 'date-fns';
 
 export default function Timeclock() {
   const [entries, setEntries] = useState([]);
-  const [guards, setGuards] = useState([]);
-  const [sites, setSites] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [editModal, setEditModal] = useState(null);
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
-    const [td, gd, sid] = await Promise.all([api.timeclock(), api.guards(), api.sites()]);
-    setEntries(td.entries || []);
-    setGuards(gd.guards || []);
-    setSites(sid.sites || []);
-    setLoading(false);
+    try {
+      const td = await api.timeclock();
+      setEntries(td.entries || []);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason.message || 'Unable to load timeclock entries.');
+    } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
   useAutoRefresh(load, 20_000); // timeclock changes as guards clock in/out
@@ -40,7 +42,9 @@ export default function Timeclock() {
   async function handleSave(e) {
     e.preventDefault(); setSaving(true);
     try {
-      await api.updateTimeclock(editModal.id, form);
+      const body = { ...form };
+      if (!body.clock_out) delete body.clock_out;
+      await api.updateTimeclock(editModal.id, body);
       setEditModal(null); await load();
     } catch (err) { alert(err.message); } finally { setSaving(false); }
   }
@@ -53,11 +57,8 @@ export default function Timeclock() {
     return `${h}h ${m}m`;
   }
 
-  const guardMap = Object.fromEntries(guards.map(g => [g.id, g]));
-  const siteMap = Object.fromEntries(sites.map(s => [s.id, s]));
-
   const filtered = entries.filter(e => {
-    const g = guardMap[e.user_id];
+    const g = e.user;
     return !search || `${g?.full_name} ${g?.email}`.toLowerCase().includes(search.toLowerCase());
   });
 
@@ -70,7 +71,9 @@ export default function Timeclock() {
         <input value={search} onChange={e => setSearch(e.target.value)} className="input pl-9 rounded-full shadow-sm" placeholder="Search by guard name…" />
       </div>
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !filtered.length ? <EmptyState icon={Clock} title="No timeclock entries" /> : (
           <div className="card p-0 overflow-hidden">
             <div className="overflow-x-auto">
@@ -82,10 +85,10 @@ export default function Timeclock() {
                   {filtered.map(e => (
                     <tr key={e.id} className={`hover:bg-gray-50/50 transition-colors ${!e.clock_out ? 'bg-green-50/30' : ''}`}>
                       <td className="table-cell">
-                        <p className="text-gray-900 text-sm font-medium">{guardMap[e.user_id]?.full_name || '—'}</p>
+                        <p className="text-gray-900 text-sm font-medium">{e.user?.full_name || e.user_id || '—'}</p>
                         {e.manually_adjusted && <span className="text-xs text-orange-600 font-medium">Adjusted manually</span>}
                       </td>
-                      <td className="table-cell text-sm text-gray-600">{siteMap[e.site_id]?.name || '—'}</td>
+                      <td className="table-cell text-sm text-gray-600">{e.site?.name || '—'}</td>
                       <td className="table-cell text-xs text-gray-600">{e.clock_in ? format(parseISO(e.clock_in), 'MMM d, HH:mm') : '—'}</td>
                       <td className="table-cell text-xs text-gray-600">{e.clock_out ? format(parseISO(e.clock_out), 'MMM d, HH:mm') : <span className="text-green-600 font-medium flex items-center gap-1"><div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"/> Active</span>}</td>
                       <td className="table-cell text-xs font-mono font-medium text-gray-900">{duration(e)}</td>
@@ -106,7 +109,7 @@ export default function Timeclock() {
         <Modal title="Edit Time Entry" onClose={() => setEditModal(null)}>
           <form onSubmit={handleSave} className="space-y-4">
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm text-gray-600">
-              Guard: <span className="text-gray-900 font-medium">{guardMap[editModal.user_id]?.full_name}</span>
+              Guard: <span className="text-gray-900 font-medium">{editModal.user?.full_name || editModal.user_id}</span>
             </div>
             <div>
               <label className="label">Clock In</label>

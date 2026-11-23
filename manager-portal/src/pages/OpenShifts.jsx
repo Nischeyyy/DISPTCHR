@@ -3,10 +3,12 @@ import { api } from '../api/client.js';
 import PageHeader from '../components/PageHeader.jsx';
 import Modal from '../components/Modal.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { Briefcase, Plus, Trash2, Users } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import { openShiftPayload } from '../domain/adminForms.js';
 
-const EMPTY = { site_id: '', start: '', end: '', role: 'Security Guard', pay_rate: '', slots: 1, notes: '' };
+const EMPTY = { site_id: '', start: '', end: '', role: 'Security Guard', pay_rate: '', spots_available: 1, urgent: false };
 
 export default function OpenShifts() {
   const [shifts, setShifts] = useState([]);
@@ -17,20 +19,25 @@ export default function OpenShifts() {
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
-    const [sd, sid, gd] = await Promise.all([api.openShifts(), api.sites(), api.guards()]);
-    setShifts(sd.open_shifts || []);
-    setSites(sid.sites || []);
-    setGuards(gd.guards || []);
-    setLoading(false);
+    try {
+      const [sd, options] = await Promise.all([api.openShifts(), api.schedulingOptions()]);
+      setShifts(sd.shifts || []);
+      setSites(options.sites || []);
+      setGuards(options.guards || []);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason.message || 'Unable to load open shifts.');
+    } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
 
   async function handleSave(e) {
     e.preventDefault(); setSaving(true); setError('');
     try {
-      await api.createOpenShift({ ...form, pay_rate: form.pay_rate ? Number(form.pay_rate) : undefined, slots: Number(form.slots) });
+      await api.createOpenShift(openShiftPayload(form));
       setModal(false); await load();
     } catch (err) { setError(err.message); } finally { setSaving(false); }
   }
@@ -49,14 +56,19 @@ export default function OpenShifts() {
       <PageHeader title="Open Shifts" subtitle="Marketplace for available shifts"
         action={<button className="btn-primary flex items-center gap-2" onClick={() => { setForm(EMPTY); setError(''); setModal(true); }}><Plus size={16} /> Post Shift</button>} />
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !shifts.length ? <EmptyState icon={Briefcase} title="No open shifts posted" subtitle="Post a shift for guards to claim" /> : (
           <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
             {shifts.map(s => (
               <div key={s.id} className="card space-y-4 hover:border-gray-300 transition-colors">
                 <div className="flex items-start justify-between">
                   <div>
-                    <p className="font-semibold text-gray-900">{siteMap[s.site_id]?.name || 'Unknown site'}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-semibold text-gray-900">{siteMap[s.site_id]?.name || s.site?.name || 'Unknown site'}</p>
+                      {s.urgent && <span className="badge bg-red-100 text-red-700 border border-red-200">URGENT</span>}
+                    </div>
                     <p className="text-xs text-gray-500 uppercase tracking-widest mt-1 font-mono">{s.role}</p>
                   </div>
                   <button onClick={() => handleDelete(s.id)} className="text-gray-400 hover:text-red-500 p-1 rounded transition-colors bg-gray-50 hover:bg-red-50"><Trash2 size={16} /></button>
@@ -68,7 +80,7 @@ export default function OpenShifts() {
                 </div>
                 <div className="flex items-center gap-2 text-xs font-medium bg-blue-50 text-blue-700 px-3 py-1.5 rounded-full w-fit">
                   <Users size={14} />
-                  <span>{s.claimed_by?.length || 0} / {s.slots || 1} claimed</span>
+                  <span>{s.claimed_by?.length || 0} / {s.spots_available || 1} claimed</span>
                 </div>
                 {s.claimed_by?.length > 0 && (
                   <div className="space-y-1.5 pt-2 border-t border-gray-100">
@@ -105,8 +117,10 @@ export default function OpenShifts() {
               <div><label className="label">End</label><input type="datetime-local" className="input" value={form.end} onChange={f('end')} required /></div>
               <div><label className="label">Role</label><input className="input" value={form.role} onChange={f('role')} /></div>
               <div><label className="label">Pay Rate ($/hr)</label><input type="number" step="0.01" className="input" value={form.pay_rate} onChange={f('pay_rate')} /></div>
-              <div><label className="label">Slots</label><input type="number" min={1} className="input" value={form.slots} onChange={f('slots')} /></div>
-              <div className="col-span-2"><label className="label">Notes</label><textarea className="input resize-none" rows={2} value={form.notes} onChange={f('notes')} /></div>
+              <div><label className="label">Available Spots</label><input type="number" min={1} className="input" value={form.spots_available} onChange={f('spots_available')} /></div>
+              <label className="col-span-2 flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input type="checkbox" checked={form.urgent} onChange={e => setForm(p => ({ ...p, urgent: e.target.checked }))} /> Mark as urgent
+              </label>
             </div>
             <div className="flex justify-end gap-3 pt-2">
               <button type="button" className="btn-secondary" onClick={() => setModal(false)}>Cancel</button>

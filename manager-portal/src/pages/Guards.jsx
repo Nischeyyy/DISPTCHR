@@ -5,13 +5,14 @@ import PageHeader from '../components/PageHeader.jsx';
 import Modal from '../components/Modal.jsx';
 import Badge from '../components/Badge.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { Users, Plus, Search, Edit2, Eye, FileText, CheckCircle, Clock, AlertCircle, ExternalLink, ShieldCheck } from 'lucide-react';
 import { format } from 'date-fns';
 
 const EMPTY_FORM = {
   full_name: '', email: '', password: '', phone: '', employee_number: '',
   licence_number: '', licence_expiry: '', employment_status: 'active',
-  certifications: [], role: 'employee',
+  certifications: [],
 };
 
 const DOC_TYPE_LABELS = {
@@ -93,16 +94,23 @@ export default function Guards() {
   const [modal, setModal] = useState(null); // null | 'create' | 'edit' | 'view'
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null); // full guard detail {guard, documents, onboarding, ...}
+  const [viewTarget, setViewTarget] = useState(null);
   const [viewLoading, setViewLoading] = useState(false);
+  const [viewError, setViewError] = useState('');
   const [viewTab, setViewTab] = useState('documents');
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
-    const data = await api.guards();
-    setGuards(data.guards || []);
-    setLoading(false);
+    try {
+      const data = await api.guards();
+      setGuards(data.guards || []);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason.message || 'Unable to load guards.');
+    } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
   useAutoRefresh(load, 60_000); // guards change infrequently
@@ -120,7 +128,7 @@ export default function Guards() {
       phone: g.phone || '', employee_number: g.employee_number || '',
       licence_number: g.licence_number || '', licence_expiry: g.licence_expiry || '',
       employment_status: g.employment_status || 'active',
-      certifications: g.certifications || [], role: g.role || 'employee',
+      certifications: g.certifications || [],
     });
     setEditing(g);
     setError('');
@@ -128,15 +136,17 @@ export default function Guards() {
   }
 
   async function openView(g) {
+    setViewTarget(g);
     setViewing(null);
+    setViewError('');
     setViewTab('documents');
     setModal('view');
     setViewLoading(true);
     try {
       const detail = await api.guard(g.id);
       setViewing(detail);
-    } catch (e) {
-      console.error(e);
+    } catch (reason) {
+      setViewError(reason.message || 'Guard details could not be loaded.');
     } finally {
       setViewLoading(false);
     }
@@ -152,6 +162,7 @@ export default function Guards() {
       } else {
         const update = { ...form };
         if (!update.password) delete update.password;
+        delete update.email;
         await api.updateGuard(editing.id, update);
       }
       setModal(null);
@@ -192,7 +203,9 @@ export default function Guards() {
         <input value={search} onChange={e => setSearch(e.target.value)} className="input pl-9 rounded-full bg-white shadow-sm" placeholder="Search by name, email, or employee #…" />
       </div>
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !filtered.length ? <EmptyState icon={Users} title="No guards found" /> : (
           <div className="card p-0 overflow-hidden">
             <div className="overflow-x-auto">
@@ -381,7 +394,7 @@ export default function Guards() {
               )}
             </div>
           ) : (
-            <div className="text-gray-400 text-sm py-8 text-center">Could not load guard details.</div>
+            <LoadFailure message={viewError || 'Guard details could not be loaded.'} onRetry={() => openView(viewTarget)} />
           )}
         </Modal>
       )}
@@ -421,13 +434,6 @@ export default function Guards() {
                 <input type="date" className="input" value={form.licence_expiry} onChange={e => setForm(f => ({...f, licence_expiry: e.target.value}))} />
               </div>
               <div>
-                <label className="label">Role</label>
-                <select className="input" value={form.role} onChange={e => setForm(f => ({...f, role: e.target.value}))}>
-                  <option value="employee">Employee</option>
-                  <option value="admin">Admin / Manager</option>
-                </select>
-              </div>
-              <div>
                 <label className="label">Employment Status</label>
                 <select className="input" value={form.employment_status} onChange={e => setForm(f => ({...f, employment_status: e.target.value}))}>
                   <option value="active">Active</option>
@@ -435,6 +441,10 @@ export default function Guards() {
                   <option value="suspended">Suspended</option>
                   <option value="terminated">Terminated</option>
                 </select>
+              </div>
+              <div className="col-span-2">
+                <label className="label">Certifications (comma separated)</label>
+                <input className="input" value={form.certifications.join(', ')} onChange={e => setForm(f => ({ ...f, certifications: e.target.value.split(',').map(value => value.trim()).filter(Boolean) }))} placeholder="First Aid, Use of Force" />
               </div>
             </div>
             <div className="flex justify-end gap-3 pt-2">

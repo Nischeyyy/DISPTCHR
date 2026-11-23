@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader.jsx';
 import Modal from '../components/Modal.jsx';
 import Badge from '../components/Badge.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { Calendar, Plus, Trash2, Edit2, Search } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 
@@ -21,13 +22,18 @@ export default function Shifts() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
-    const [sd, gd, sid] = await Promise.all([api.shifts(), api.guards(), api.sites()]);
-    setShifts(sd.shifts || []);
-    setGuards(gd.guards || []);
-    setSites(sid.sites || []);
-    setLoading(false);
+    try {
+      const [sd, options] = await Promise.all([api.shifts(), api.schedulingOptions()]);
+      setShifts(sd.shifts || []);
+      setGuards(options.guards || []);
+      setSites(options.sites || []);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason.message || 'Unable to load shifts.');
+    } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
   useAutoRefresh(load, 30_000); // catch guard-claimed open shifts
@@ -72,7 +78,9 @@ export default function Shifts() {
         <input value={search} onChange={e => setSearch(e.target.value)} className="input pl-9 rounded-full bg-white shadow-sm" placeholder="Search guards or sites…" />
       </div>
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !filtered.length ? <EmptyState icon={Calendar} title="No shifts scheduled" /> : (
           <div className="card p-0 overflow-hidden">
             <div className="overflow-x-auto">

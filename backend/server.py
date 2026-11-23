@@ -218,6 +218,16 @@ def parse_datetime_utc(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def validate_shift_interval(start: str, end: str) -> None:
+    try:
+        start_at = parse_datetime_utc(start)
+        end_at = parse_datetime_utc(end)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Shift start and end must be valid ISO 8601 dates")
+    if end_at <= start_at:
+        raise HTTPException(422, "Shift end must be after shift start")
+
+
 def hash_password(pw: str) -> str:
     normalized = hashlib.sha256(pw.encode("utf-8")).hexdigest().encode("ascii")
     return "bcrypt-sha256$" + bcrypt.hashpw(normalized, bcrypt.gensalt()).decode()
@@ -367,6 +377,7 @@ def required_manager_permission(path: str) -> Optional[str]:
         ("/admin/employee-badge", "guards.manage"),
         ("/admin/guards", "guards.manage"),
         ("/admin/sites", "sites.manage"),
+        ("/admin/scheduling", "scheduling.manage"),
         ("/admin/shifts", "scheduling.manage"),
         ("/admin/open-shifts", "scheduling.manage"),
         ("/admin/shift-swaps", "scheduling.manage"),
@@ -753,6 +764,11 @@ async def ensure_indexes():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
     await db.shifts.create_index("id", unique=True)
+    await db.shifts.create_index(
+        [("claimed_from_open", 1), ("user_id", 1)],
+        unique=True,
+        partialFilterExpression={"claimed_from_open": {"$type": "string"}},
+    )
     await db.open_shifts.create_index("id", unique=True)
     await db.sites.create_index("id", unique=True)
     await db.announcements.create_index("id", unique=True)
@@ -1501,14 +1517,39 @@ async def claim_shift(shift_id: str, user=Depends(get_current_user)):
     s = await db.open_shifts.find_one({"id": shift_id})
     if not s:
         raise HTTPException(404, "Shift not found")
-    claimed = s.get("claimed_by") or []
-    if user["id"] in claimed:
+    if user["id"] in (s.get("claimed_by") or []):
         raise HTTPException(400, "Already claimed")
-    if len(claimed) >= s["spots_available"]:
-        # Add to waitlist
+    overlap = await db.shifts.find_one({
+        "user_id": user["id"],
+        "status": {"$ne": "cancelled"},
+        "start": {"$lt": s["end"]},
+        "end": {"$gt": s["start"]},
+    })
+    if overlap:
+        raise HTTPException(409, "This shift overlaps an existing scheduled shift")
+    reserved = await db.open_shifts.find_one_and_update(
+        {
+            "id": shift_id,
+            "claimed_by": {"$ne": user["id"]},
+            "$expr": {
+                "$lt": [
+                    {"$size": {"$ifNull": ["$claimed_by", []]}},
+                    "$spots_available",
+                ]
+            },
+        },
+        {"$addToSet": {"claimed_by": user["id"]}, "$pull": {"waitlist": user["id"]}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not reserved:
+        latest = await db.open_shifts.find_one({"id": shift_id})
+        if not latest:
+            raise HTTPException(404, "Shift not found")
+        if user["id"] in (latest.get("claimed_by") or []):
+            raise HTTPException(400, "Already claimed")
         await db.open_shifts.update_one({"id": shift_id}, {"$addToSet": {"waitlist": user["id"]}})
         return {"status": "waitlisted"}
-    await db.open_shifts.update_one({"id": shift_id}, {"$addToSet": {"claimed_by": user["id"]}})
+    s = reserved
     # Create a scheduled shift for the user
     new_shift = {
         "id": str(uuid.uuid4()), "user_id": user["id"], "site_id": s["site_id"],
@@ -1517,7 +1558,14 @@ async def claim_shift(shift_id: str, user=Depends(get_current_user)):
         "claimed_from_open": shift_id,
         "instructions_acknowledged": False,
     }
-    await db.shifts.insert_one(new_shift)
+    try:
+        await db.shifts.insert_one(new_shift)
+    except DuplicateKeyError:
+        await db.open_shifts.update_one({"id": shift_id}, {"$pull": {"claimed_by": user["id"]}})
+        raise HTTPException(409, "This open shift has already been claimed by this guard")
+    except Exception:
+        await db.open_shifts.update_one({"id": shift_id}, {"$pull": {"claimed_by": user["id"]}})
+        raise
     await send_push([user["id"]], {"title": "Shift Claimed", "message": f"You claimed {s['role']} on {s['start'][:10]}"})
     await notif.save_inapp(db, [user["id"]], "Shift Claimed ✓", f"You claimed {s['role']} on {s['start'][:10]}.", category="shift")
     return {"status": "claimed", "shift_id": new_shift["id"]}
@@ -1741,7 +1789,15 @@ async def wallet(user=Depends(get_current_user)):
 # ============================================================
 @api.get("/announcements")
 async def announcements(user=Depends(get_current_user)):
-    items = await db.announcements.find({}, {"_id": 0}).sort("posted_at", -1).to_list(50)
+    site_ids = await db.shifts.distinct("site_id", {"user_id": user["id"]})
+    audience = [
+        {"recipient_ids": user["id"]},
+        {"recipient_ids": {"$exists": False}, "site_id": None},
+        {"recipient_ids": {"$exists": False}, "site_id": {"$exists": False}},
+    ]
+    if site_ids:
+        audience.append({"recipient_ids": {"$exists": False}, "site_id": {"$in": site_ids}})
+    items = await db.announcements.find({"$or": audience}, {"_id": 0}).sort("posted_at", -1).to_list(50)
     for a in items:
         a["read"] = user["id"] in (a.get("read_by") or [])
         a["read_count"] = len(a.get("read_by") or [])
@@ -1750,8 +1806,16 @@ async def announcements(user=Depends(get_current_user)):
 
 @api.post("/announcements/{ann_id}/acknowledge")
 async def ack_announcement(ann_id: str, user=Depends(get_current_user)):
+    site_ids = await db.shifts.distinct("site_id", {"user_id": user["id"]})
+    audience = [
+        {"recipient_ids": user["id"]},
+        {"recipient_ids": {"$exists": False}, "site_id": None},
+        {"recipient_ids": {"$exists": False}, "site_id": {"$exists": False}},
+    ]
+    if site_ids:
+        audience.append({"recipient_ids": {"$exists": False}, "site_id": {"$in": site_ids}})
     r = await db.announcements.update_one(
-        {"id": ann_id}, {"$addToSet": {"read_by": user["id"]}}
+        {"id": ann_id, "$or": audience}, {"$addToSet": {"read_by": user["id"]}}
     )
     if r.matched_count == 0:
         raise HTTPException(404, "Announcement not found")
@@ -2207,35 +2271,39 @@ class AdminUpdateGuardIn(BaseModel):
 
 
 class AdminCreateSiteIn(BaseModel):
-    name: str
-    address: str
-    latitude: float
-    longitude: float
-    supervisor: str
-    supervisor_phone: str
-    instructions: str = ""
-    geofence_radius_m: int = 150
+    name: str = Field(min_length=1, max_length=200)
+    client_name: Optional[str] = Field(default=None, max_length=200)
+    address: str = Field(min_length=1, max_length=500)
+    city: Optional[str] = Field(default=None, max_length=120)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    supervisor: str = Field(min_length=1, max_length=200)
+    supervisor_phone: str = Field(min_length=3, max_length=50)
+    instructions: str = Field(default="", max_length=5000)
+    geofence_radius_m: int = Field(default=150, ge=25, le=10_000)
 
 
 class AdminUpdateSiteIn(BaseModel):
-    name: Optional[str] = None
-    address: Optional[str] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    supervisor: Optional[str] = None
-    supervisor_phone: Optional[str] = None
-    instructions: Optional[str] = None
-    geofence_radius_m: Optional[int] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    client_name: Optional[str] = Field(default=None, max_length=200)
+    address: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    city: Optional[str] = Field(default=None, max_length=120)
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    supervisor: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    supervisor_phone: Optional[str] = Field(default=None, min_length=3, max_length=50)
+    instructions: Optional[str] = Field(default=None, max_length=5000)
+    geofence_radius_m: Optional[int] = Field(default=None, ge=25, le=10_000)
 
 
 class AdminCreateShiftIn(BaseModel):
-    user_id: str
-    site_id: str
-    start: str
-    end: str
-    role: str = "Patrol"
-    pay_rate: float = 24.50
-    notes: Optional[str] = None
+    user_id: str = Field(min_length=1, max_length=100)
+    site_id: str = Field(min_length=1, max_length=100)
+    start: str = Field(min_length=10, max_length=50)
+    end: str = Field(min_length=10, max_length=50)
+    role: str = Field(default="Patrol", min_length=1, max_length=100)
+    pay_rate: float = Field(default=24.50, ge=0, le=1000)
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 
 class AdminUpdateShiftIn(BaseModel):
@@ -2251,21 +2319,21 @@ class AdminUpdateShiftIn(BaseModel):
 
 
 class AdminCreateOpenShiftIn(BaseModel):
-    site_id: str
-    start: str
-    end: str
-    role: str = "Patrol"
-    pay_rate: float = 24.50
-    spots_available: int = 1
+    site_id: str = Field(min_length=1, max_length=100)
+    start: str = Field(min_length=10, max_length=50)
+    end: str = Field(min_length=10, max_length=50)
+    role: str = Field(default="Patrol", min_length=1, max_length=100)
+    pay_rate: float = Field(default=24.50, ge=0, le=1000)
+    spots_available: int = Field(default=1, ge=1, le=500)
     urgent: bool = False
 
 
 class AdminCreateAnnouncementIn(BaseModel):
-    title: str
-    body: str
-    severity: str = "info"
-    site_id: Optional[str] = None
-    posted_by: Optional[str] = None
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=5000)
+    severity: Literal["info", "warning", "critical"] = "info"
+    site_id: Optional[str] = Field(default=None, max_length=100)
+    posted_by: Optional[str] = Field(default=None, max_length=120)
 
 
 class AdminUpdateIncidentIn(BaseModel):
@@ -2311,9 +2379,10 @@ class AdminUpdatePayrollIn(BaseModel):
 
 
 class AdminUpdateTimeclockIn(BaseModel):
-    clock_in: Optional[str] = None
-    clock_out: Optional[str] = None
-    hours_worked: Optional[float] = None
+    clock_in: Optional[str] = Field(default=None, max_length=50)
+    clock_out: Optional[str] = Field(default=None, max_length=50)
+    hours_worked: Optional[float] = Field(default=None, ge=0, le=24)
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 
 # ============================================================
@@ -2463,6 +2532,8 @@ async def admin_update_site(site_id: str, body: AdminUpdateSiteIn, admin=Depends
 
 @api.delete("/admin/sites/{site_id}", status_code=204)
 async def admin_delete_site(site_id: str, admin=Depends(require_admin)):
+    if await db.shifts.find_one({"site_id": site_id}, {"_id": 1}) or await db.open_shifts.find_one({"site_id": site_id}, {"_id": 1}):
+        raise HTTPException(409, "Site is used by scheduled or open shifts and cannot be deleted")
     r = await db.sites.delete_one({"id": site_id})
     if r.deleted_count == 0:
         raise HTTPException(404, "Site not found")
@@ -2471,6 +2542,19 @@ async def admin_delete_site(site_id: str, admin=Depends(require_admin)):
 # ============================================================
 # ADMIN ROUTES — Shifts
 # ============================================================
+
+@api.get("/admin/scheduling/options")
+async def admin_scheduling_options(admin=Depends(require_admin)):
+    """Supply limited scheduling choices without granting broad record access."""
+    guards = await db.users.find(
+        {"role": "employee", "access_status": {"$ne": "disabled"}},
+        {"_id": 0, "id": 1, "full_name": 1, "email": 1, "employee_number": 1},
+    ).sort("full_name", 1).to_list(500)
+    sites = await db.sites.find(
+        {"active": {"$ne": False}},
+        {"_id": 0, "id": 1, "name": 1, "address": 1},
+    ).sort("name", 1).to_list(200)
+    return {"guards": guards, "sites": sites}
 
 @api.get("/admin/shifts")
 async def admin_list_shifts(
@@ -2502,7 +2586,8 @@ async def admin_list_shifts(
 
 @api.post("/admin/shifts", status_code=201)
 async def admin_create_shift(body: AdminCreateShiftIn, admin=Depends(require_admin)):
-    if not await db.users.find_one({"id": body.user_id}):
+    validate_shift_interval(body.start, body.end)
+    if not await db.users.find_one({"id": body.user_id, "role": "employee"}):
         raise HTTPException(404, "Guard not found")
     if not await db.sites.find_one({"id": body.site_id}):
         raise HTTPException(404, "Site not found")
@@ -2532,9 +2617,26 @@ async def admin_update_shift(shift_id: str, body: AdminUpdateShiftIn, admin=Depe
     update = {k: v for k, v in body.model_dump().items() if v is not None}
     if not update:
         raise HTTPException(400, "No fields to update")
-    r = await db.shifts.update_one({"id": shift_id}, {"$set": update})
-    if r.matched_count == 0:
+    current = await db.shifts.find_one({"id": shift_id})
+    if not current:
         raise HTTPException(404, "Shift not found")
+    merged = {**current, **update}
+    validate_shift_interval(merged["start"], merged["end"])
+    if "user_id" in update and not await db.users.find_one({"id": merged["user_id"], "role": "employee"}, {"_id": 1}):
+        raise HTTPException(404, "Guard not found")
+    if "site_id" in update and not await db.sites.find_one({"id": merged["site_id"]}, {"_id": 1}):
+        raise HTTPException(404, "Site not found")
+    if merged.get("status") != "cancelled":
+        overlap = await db.shifts.find_one({
+            "id": {"$ne": shift_id},
+            "user_id": merged["user_id"],
+            "status": {"$ne": "cancelled"},
+            "start": {"$lt": merged["end"]},
+            "end": {"$gt": merged["start"]},
+        })
+        if overlap:
+            raise HTTPException(409, f"Scheduling conflict: guard already has a shift from {overlap['start'][:16]} to {overlap['end'][:16]}.")
+    await db.shifts.update_one({"id": shift_id}, {"$set": update})
     return await db.shifts.find_one({"id": shift_id}, {"_id": 0})
 
 
@@ -2562,6 +2664,7 @@ async def admin_list_open_shifts(admin=Depends(require_admin)):
 
 @api.post("/admin/open-shifts", status_code=201)
 async def admin_create_open_shift(body: AdminCreateOpenShiftIn, admin=Depends(require_admin)):
+    validate_shift_interval(body.start, body.end)
     if not await db.sites.find_one({"id": body.site_id}):
         raise HTTPException(404, "Site not found")
     shift = {"id": str(uuid.uuid4()), **body.model_dump(), "posted_at": iso(now_utc()), "claimed_by": [], "waitlist": [], "posted_by": admin["id"]}
@@ -2585,21 +2688,43 @@ async def admin_list_announcements(admin=Depends(require_admin)):
     items = await db.announcements.find({}, {"_id": 0}).sort("posted_at", -1).to_list(200)
     total_guards = await db.users.count_documents({"role": "employee"})
     for a in items:
-        a["read_count"] = len(a.get("read_by") or []); a["total_guards"] = total_guards
+        a["read_count"] = len(a.get("read_by") or [])
+        if "recipient_ids" in a:
+            a["total_guards"] = len(a.get("recipient_ids") or [])
+        elif a.get("site_id"):
+            a["total_guards"] = len(await db.shifts.distinct("user_id", {"site_id": a["site_id"]}))
+        else:
+            a["total_guards"] = total_guards
     return {"announcements": items}
+
+
+@api.get("/admin/announcements/sites")
+async def admin_announcement_sites(admin=Depends(require_admin)):
+    sites = await db.sites.find(
+        {"active": {"$ne": False}},
+        {"_id": 0, "id": 1, "name": 1},
+    ).sort("name", 1).to_list(200)
+    return {"sites": sites}
 
 
 @api.post("/admin/announcements", status_code=201)
 async def admin_create_announcement(body: AdminCreateAnnouncementIn, admin=Depends(require_admin)):
+    if body.site_id and not await db.sites.find_one({"id": body.site_id}, {"_id": 1}):
+        raise HTTPException(404, "Site not found")
+    if body.site_id:
+        scheduled_ids = await db.shifts.distinct("user_id", {"site_id": body.site_id})
+        guard_filter = {"role": "employee", "id": {"$in": scheduled_ids}}
+    else:
+        guard_filter = {"role": "employee"}
+    guards = await db.users.find(guard_filter, {"id": 1, "email": 1, "_id": 0}).to_list(500)
+    guard_ids = [g["id"] for g in guards]
     ann = {
         "id": str(uuid.uuid4()), "title": body.title, "body": body.body,
         "severity": body.severity, "site_id": body.site_id,
         "posted_by": body.posted_by or admin.get("full_name", "Admin"),
-        "posted_at": iso(now_utc()), "read_by": [],
+        "posted_at": iso(now_utc()), "read_by": [], "recipient_ids": guard_ids,
     }
     await db.announcements.insert_one(ann); ann.pop("_id", None)
-    guards = await db.users.find({"role": "employee"}, {"id": 1, "email": 1, "_id": 0}).to_list(500)
-    guard_ids = [g["id"] for g in guards]
     await send_push(guard_ids, {"title": body.title, "message": body.body[:120]})
     ann_html = notif.email_template(
         body.title,
@@ -2703,6 +2828,16 @@ async def admin_list_payroll(
         um = {u["id"]: u for u in await db.users.find({"id": {"$in": uids}}, SENSITIVE_USER_PROJECTION).to_list(500)}
         for p in periods: p["user"] = um.get(p["user_id"])
     return {"periods": periods}
+
+
+@api.get("/admin/payroll/guards")
+async def admin_payroll_guards(admin=Depends(require_admin)):
+    guards = await db.users.find(
+        {"role": "employee"},
+        {"_id": 0, "id": 1, "full_name": 1, "email": 1, "employee_number": 1,
+         "licence_number": 1, "licence_expiry": 1, "hourly_rate": 1},
+    ).sort("full_name", 1).to_list(500)
+    return {"guards": guards}
 
 
 @api.post("/admin/payroll", status_code=201)
@@ -2992,10 +3127,36 @@ async def admin_update_timeclock(entry_id: str, body: AdminUpdateTimeclockIn, ad
     update = {k: v for k, v in body.model_dump().items() if v is not None}
     if not update:
         raise HTTPException(400, "No fields to update")
-    update.update({"manually_adjusted": True, "adjusted_by": admin["id"], "adjusted_at": iso(now_utc())})
-    r = await db.timeclock.update_one({"id": entry_id}, {"$set": update})
-    if r.matched_count == 0:
+    current = await db.timeclock.find_one({"id": entry_id})
+    if not current:
         raise HTTPException(404, "Timeclock entry not found")
+    merged = {**current, **update}
+    if "clock_in" in update or "clock_out" in update:
+        try:
+            clock_in_at = parse_datetime_utc(merged["clock_in"])
+            clock_out_at = parse_datetime_utc(merged["clock_out"]) if merged.get("clock_out") else None
+        except (TypeError, ValueError):
+            raise HTTPException(422, "Clock-in and clock-out must be valid ISO 8601 dates")
+        if clock_out_at:
+            if clock_out_at <= clock_in_at:
+                raise HTTPException(422, "Clock-out must be after clock-in")
+            break_seconds = 0.0
+            for item in merged.get("breaks") or []:
+                if not item.get("start") or not item.get("end"):
+                    continue
+                try:
+                    break_start = parse_datetime_utc(item["start"])
+                    break_end = parse_datetime_utc(item["end"])
+                except (TypeError, ValueError):
+                    continue
+                if break_end > break_start:
+                    break_seconds += (break_end - break_start).total_seconds()
+            elapsed_seconds = max(0.0, (clock_out_at - clock_in_at).total_seconds() - break_seconds)
+            update["hours_worked"] = round(elapsed_seconds / 3600, 2)
+    update.update({"manually_adjusted": True, "adjusted_by": admin["id"], "adjusted_at": iso(now_utc())})
+    await db.timeclock.update_one({"id": entry_id}, {"$set": update})
+    if current.get("shift_id") and "hours_worked" in update:
+        await db.shifts.update_one({"id": current["shift_id"]}, {"$set": {"hours_worked": update["hours_worked"]}})
     return await db.timeclock.find_one({"id": entry_id}, {"_id": 0, "selfie_in": 0, "selfie_out": 0})
 
 
@@ -3581,10 +3742,14 @@ async def admin_compliance(admin=Depends(require_admin)):
         expiring_soon = sum(1 for d in docs if d.get("expiry") and _compliance_status(d["expiry"]) == "expiring_soon")
         lic_status = _compliance_status(g["licence_expiry"]) if g.get("licence_expiry") else "unknown"
         results.append({
+            "id": g["id"],
             "user_id": g["id"],
             "full_name": g["full_name"],
+            "email": g.get("email"),
             "employee_number": g.get("employee_number"),
+            "licence_number": g.get("licence_number"),
             "licence_expiry": g.get("licence_expiry"),
+            "certifications": g.get("certifications") or [],
             "licence_status": lic_status,
             "expired_docs": expired,
             "expiring_soon_docs": expiring_soon,

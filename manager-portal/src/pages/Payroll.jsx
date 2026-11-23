@@ -4,6 +4,7 @@ import PageHeader from '../components/PageHeader.jsx';
 import Badge from '../components/Badge.jsx';
 import Modal from '../components/Modal.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import PayrollDashboard from '../components/PayrollDashboard.jsx';
 import PayrollFeaturePanel, { DEFAULT_FEATURES } from '../components/PayrollFeaturePanel.jsx';
 import { DollarSign, Plus, Edit2, Calculator, Trash2, Upload, FileSpreadsheet, CheckCircle2, XCircle, Search, Users, FileDown, ChevronUp, ChevronDown, ChevronsUpDown, X, Settings2, AlertTriangle, Calendar, MessageSquare, FileText, Download, UserX, Link2 } from 'lucide-react';
@@ -27,6 +28,7 @@ export default function Payroll() {
   const [entries, setEntries] = useState([]);
   const [guards, setGuards] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [modal, setModal] = useState(null);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY);
@@ -38,6 +40,7 @@ export default function Payroll() {
   const [calcProgress, setCalcProgress] = useState(null); // null | { done, total, errors }
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [preferenceError, setPreferenceError] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [filterGuardIds, setFilterGuardIds] = useState([]);
   const [guardSearchOpen, setGuardSearchOpen] = useState(false);
@@ -49,10 +52,20 @@ export default function Payroll() {
   // ── Feature flags ──
   const [features, setFeatures] = useState(DEFAULT_FEATURES);
   const [featurePanelOpen, setFeaturePanelOpen] = useState(false);
+  async function savePreferences(body, rollback) {
+    try {
+      await api.updatePayrollPreferences(body);
+      setPreferenceError('');
+    } catch (reason) {
+      rollback();
+      setPreferenceError(reason.message || 'Payroll display preferences could not be saved.');
+    }
+  }
   function toggleFeature(id) {
+    const previous = features;
     const next = { ...features, [id]: !features[id] };
     setFeatures(next);
-    api.updatePayrollPreferences({ features: next }).catch(() => load());
+    savePreferences({ features: next }, () => setFeatures(previous));
   }
 
   // ── Column visibility (main table) ──
@@ -73,9 +86,10 @@ export default function Payroll() {
   const [colSettings, setColSettings] = useState(COL_DEFAULTS);
   const [colMenuOpen, setColMenuOpen] = useState(false);
   function toggleCol(key) {
+    const previous = colSettings;
     const next = { ...colSettings, [key]: !colSettings[key] };
     setColSettings(next);
-    api.updatePayrollPreferences({ columns: next }).catch(() => load());
+    savePreferences({ columns: next }, () => setColSettings(previous));
   }
 
   // ── Detail drawer ──
@@ -183,23 +197,30 @@ export default function Payroll() {
   const [tsSettings, setTsSettings] = useState(TS_DEFAULTS);
   const [tsSettingsOpen, setTsSettingsOpen] = useState(false);
   function toggleTsCol(key) {
+    const previous = tsSettings;
     const next = { ...tsSettings, [key]: !tsSettings[key] };
     setTsSettings(next);
-    api.updatePayrollPreferences({ timesheet_columns: next }).catch(() => load());
+    savePreferences({ timesheet_columns: next }, () => setTsSettings(previous));
   }
 
   async function load() {
-    const [pd, gd, preferences] = await Promise.all([
-      api.payroll(filterStatus ? `?status=${filterStatus}` : ''),
-      api.guards(),
-      api.payrollPreferences(),
-    ]);
-    setEntries(pd.periods || pd.entries || []);
-    setGuards(gd.guards || []);
-    setFeatures({ ...DEFAULT_FEATURES, ...(preferences.features || {}) });
-    setColSettings({ ...COL_DEFAULTS, ...(preferences.columns || {}) });
-    setTsSettings({ ...TS_DEFAULTS, ...(preferences.timesheet_columns || {}) });
-    setLoading(false);
+    try {
+      const [pd, gd, preferences] = await Promise.all([
+        api.payroll(filterStatus ? `?status=${filterStatus}` : ''),
+        api.payrollGuards(),
+        api.payrollPreferences(),
+      ]);
+      setEntries(pd.periods || pd.entries || []);
+      setGuards(gd.guards || []);
+      setFeatures({ ...DEFAULT_FEATURES, ...(preferences.features || {}) });
+      setColSettings({ ...COL_DEFAULTS, ...(preferences.columns || {}) });
+      setTsSettings({ ...TS_DEFAULTS, ...(preferences.timesheet_columns || {}) });
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason?.message || 'Payroll information could not be loaded.');
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => { setLoading(true); load(); }, [filterStatus]);
 
@@ -538,6 +559,13 @@ export default function Payroll() {
         </div>
       </div>
 
+      {preferenceError && (
+        <div role="alert" className="mb-5 flex items-center justify-between gap-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <span>{preferenceError}</span>
+          <button type="button" className="font-semibold underline" onClick={() => setPreferenceError('')}>Dismiss</button>
+        </div>
+      )}
+
       {/* ── Status tabs ── */}
       <div className="flex gap-1 mb-5 border-b border-gray-100 pb-0">
         {['', 'submitted', 'under_review', 'approved', 'paid'].map(s => {
@@ -672,7 +700,7 @@ export default function Payroll() {
                   </label>
                 ))}
                 <div className="border-t border-gray-100 pt-1 mt-1">
-                  <button onClick={() => { setColSettings(COL_DEFAULTS); api.updatePayrollPreferences({ columns: COL_DEFAULTS }).catch(() => load()); }}
+                  <button onClick={() => { const previous = colSettings; setColSettings(COL_DEFAULTS); savePreferences({ columns: COL_DEFAULTS }, () => setColSettings(previous)); }}
                     className="w-full text-xs text-gray-400 hover:text-gray-700 py-1 text-center transition-colors">
                     Reset to default
                   </button>
@@ -720,7 +748,9 @@ export default function Payroll() {
         ) : null;
       })()}
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !displayedEntries.length ? (
           entries.length && (filterGuardIds.length > 0 || filterStatus || searchText)
             ? <div className="text-center py-12 text-gray-400 text-sm">No entries match your filters. <button className="underline text-gray-500 hover:text-gray-800" onClick={() => { setFilterGuardIds([]); setFilterStatus(''); setSearchText(''); }}>Clear filters</button></div>

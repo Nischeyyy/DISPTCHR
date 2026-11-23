@@ -5,20 +5,23 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import StatCard from '../components/StatCard.jsx';
 import PageHeader from '../components/PageHeader.jsx';
 import Badge from '../components/Badge.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { Users, Calendar, Clock, FileText, DollarSign } from 'lucide-react';
 import { format } from 'date-fns';
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
     try {
       const d = await api.dashboard();
       setData(d);
-    } catch (e) {
-      console.error(e);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason?.message || 'Dashboard information could not be loaded.');
     } finally {
       setLoading(false);
     }
@@ -28,7 +31,7 @@ export default function Dashboard() {
   useAutoRefresh(load, 30_000);
 
   if (loading) return <div className="text-gray-500 text-sm">Loading dashboard…</div>;
-  if (!data) return null;
+  if (loadError || !data) return <LoadFailure message={loadError || 'Dashboard information could not be loaded.'} onRetry={() => { setLoading(true); load(); }} />;
 
   return (
     <div className="space-y-6">

@@ -15,8 +15,8 @@ No fake business records, demo accounts, default passwords, or development authe
 | --- | --- | --- |
 | Workforce backend syntax | Green | all production Python modules compile |
 | Backend security scan | Green | Bandit reports no findings; the production Python dependency audit reports 0 known vulnerabilities |
-| Backend automated tests | Green | 46 core tests passed; 24 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
-| Manager Portal | Green | 9 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
+| Backend automated tests | Green | 48 core tests passed; 24 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
+| Manager Portal | Green | 12 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Disptchr Panel database | Green | schema v6 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
 | Disptchr Panel | Green | TypeScript passed; 5 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Guard application | Green | lint and TypeScript passed; Expo Doctor 20/20; dependency audit reports 0 vulnerabilities |
@@ -44,6 +44,9 @@ No fake business records, demo accounts, default passwords, or development authe
 - The guard dashboard no longer contains a sample dispatch number. It uses the validated `DISPATCH_PHONE` production setting and disables the call action when local development has no approved company number.
 - Time Clock resolves a real assigned shift even when opened directly, displays the assignment, blocks capture outside the allowed window, and is independently revalidated by the API.
 - Manager Portal provides permission-controlled guards, sites, shifts, open shifts, timeclock, live locations, incidents, SOS, announcements, compliance, shift swaps, and payroll workflows.
+- Manager screens expose failed reads with an accessible error and retry action instead of remaining in an indefinite loading state. Scheduling, payroll, announcements, incidents, swaps, timeclock, and compliance use permission-scoped API contracts, so a manager does not need unrelated guard-record or site-administration access to use an assigned tool.
+- Manager form fields now match the authoritative API contract: sites persist coordinates, geofence radius, supervisor contacts and instructions; open shifts persist capacity and urgency; announcements persist severity and a fixed global or site-specific audience. Site-targeted announcements are enforced for list, acknowledgement, email, push, and in-app delivery.
+- Open-shift slot reservation is atomic and protected by a database uniqueness invariant, overlapping claims are rejected, shift edits re-run interval and overlap validation, and timeclock edits recalculate worked hours and synchronize the associated shift.
 - Durable email, SMS, and Expo notification jobs use leases, retry/backoff, retention, dead-letter state, and a separately monitored worker.
 
 ### Directors' Disptchr Panel

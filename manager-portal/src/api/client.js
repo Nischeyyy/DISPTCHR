@@ -53,6 +53,7 @@ export const api = {
   deleteSite: (id) => request('DELETE', `/admin/sites/${id}`),
 
   // Shifts
+  schedulingOptions: () => request('GET', '/admin/scheduling/options'),
   shifts: (params = '') => request('GET', `/admin/shifts${params}`),
   createShift: (body) => request('POST', '/admin/shifts', body),
   updateShift: (id, body) => request('PUT', `/admin/shifts/${id}`, body),
@@ -83,6 +84,7 @@ export const api = {
 
   // Payroll
   payroll: (params = '') => request('GET', `/admin/payroll${params}`),
+  payrollGuards: () => request('GET', '/admin/payroll/guards'),
   createPayroll: (body) => request('POST', '/admin/payroll', body),
   updatePayroll: (id, body) => request('PUT', `/admin/payroll/${id}`, body),
   bulkUpdatePayroll: (ids, patch) => Promise.all(ids.map(id => request('PUT', `/admin/payroll/${id}`, patch))),
@@ -97,6 +99,7 @@ export const api = {
 
   // Announcements
   announcements: () => request('GET', '/admin/announcements'),
+  announcementSites: () => request('GET', '/admin/announcements/sites'),
   createAnnouncement: (body) => request('POST', '/admin/announcements', body),
   deleteAnnouncement: (id) => request('DELETE', `/admin/announcements/${id}`),
 

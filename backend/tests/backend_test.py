@@ -410,6 +410,14 @@ class TestShiftSwaps:
                 f"{BASE_URL}/api/auth/manager-login",
                 json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "mfa_code": ADMIN_RECOVERY_CODE},
             ), 200)
+            options = expect(manager_session.get(f"{BASE_URL}/api/admin/scheduling/options"), 200)
+            assert options["guards"] and options["sites"]
+            assert "hashed_password" not in options["guards"][0]
+            assert expect(manager_session.get(f"{BASE_URL}/api/admin/payroll/guards"), 200)["guards"]
+            assert expect(manager_session.get(f"{BASE_URL}/api/admin/announcements/sites"), 200)["sites"]
+            open_shifts = expect(manager_session.get(f"{BASE_URL}/api/admin/open-shifts"), 200)
+            assert "shifts" in open_shifts
+            assert open_shifts["shifts"][0]["spots_available"] == 1
             awaiting = expect(manager_session.get(f"{BASE_URL}/api/admin/shift-swaps?status=accepted"), 200)
             assert any(item["id"] == created["id"] for item in awaiting["swaps"])
             expect(manager_session.post(

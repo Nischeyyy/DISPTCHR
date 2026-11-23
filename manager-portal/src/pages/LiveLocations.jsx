@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api/client.js';
 import PageHeader from '../components/PageHeader.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { Radio, MapPin, RefreshCw } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 
@@ -10,6 +11,7 @@ export default function LiveLocations() {
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
     setRefreshing(true);
@@ -17,8 +19,9 @@ export default function LiveLocations() {
       const d = await api.liveLocations();
       setLocations(d.locations || d.guards || []);
       setLastRefresh(new Date());
+      setLoadError('');
     } catch (err) {
-      console.error(err);
+      setLoadError(err.message || 'Unable to load live locations.');
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -50,7 +53,9 @@ export default function LiveLocations() {
         <span className="text-sm text-gray-500 font-medium">Auto-refreshes every 30 seconds</span>
       </div>
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !locations.length ? (
           <EmptyState
             icon={Radio}

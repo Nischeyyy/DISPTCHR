@@ -1,10 +1,11 @@
 import React, { useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, Switch, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, Switch, ActivityIndicator, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "@/src/auth/AuthContext";
 import { api } from "@/src/api/client";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 // ─── Light palette (matches Profile / Schedule) ─────────────────────────────
 const C = {
@@ -48,29 +49,33 @@ export default function Settings() {
   const router = useRouter();
   const { logout, user } = useAuth();
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [pushEnabled, setPushEnabled] = useState(true);
   const [locationEnabled, setLocationEnabled] = useState(true);
 
-  useFocusEffect(
-    useCallback(() => {
-      let active = true;
-      api("/settings").then((s) => {
-        if (!active) return;
-        setPushEnabled(s.push_notifications);
-        setLocationEnabled(s.location_sharing);
-        setLoaded(true);
-      }).catch(() => setLoaded(true));
-      return () => { active = false; };
-    }, [])
-  );
+  const load = useCallback(async () => {
+    setLoaded(false);
+    setLoadError("");
+    try {
+      const settings = await api("/settings");
+      setPushEnabled(settings.push_notifications);
+      setLocationEnabled(settings.location_sharing);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load settings."));
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const updateSetting = (key: "push_notifications" | "location_sharing", value: boolean) => {
     if (key === "push_notifications") setPushEnabled(value);
     else setLocationEnabled(value);
-    api("/settings", { method: "PUT", body: { [key]: value } }).catch(() => {
+    api("/settings", { method: "PUT", body: { [key]: value } }).catch((error) => {
       // Revert on failure so the UI never claims a preference was saved when it wasn't.
       if (key === "push_notifications") setPushEnabled(!value);
       else setLocationEnabled(!value);
+      Alert.alert("Setting not saved", errorMessage(error, "Unable to save this setting."));
     });
   };
 
@@ -80,6 +85,10 @@ export default function Settings() {
         <ActivityIndicator color={C.accent} />
       </SafeAreaView>
     );
+  }
+
+  if (loadError) {
+    return <SafeAreaView style={styles.safe} edges={["top"]}><LoadError message={loadError} onRetry={load} /></SafeAreaView>;
   }
 
   return (

@@ -3,6 +3,7 @@ import { api } from '../api/client.js';
 import PageHeader from '../components/PageHeader.jsx';
 import Badge from '../components/Badge.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import Modal from '../components/Modal.jsx';
 import { ArrowLeftRight, Check, X } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
@@ -12,16 +13,19 @@ export default function ShiftSwaps() {
   const [swaps, setSwaps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState(DEFAULT_SWAP_FILTER);
-  const [guards, setGuards] = useState([]);
   const [decisionModal, setDecisionModal] = useState(null);
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
-    const [sd, gd] = await Promise.all([api.swaps(filter), api.guards()]);
-    setSwaps(sd.swaps || []);
-    setGuards(gd.guards || []);
-    setLoading(false);
+    try {
+      const sd = await api.swaps(filter);
+      setSwaps(sd.swaps || []);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason.message || 'Unable to load shift swaps.');
+    } finally { setLoading(false); }
   }
   useEffect(() => { setLoading(true); load(); }, [filter]);
 
@@ -35,7 +39,6 @@ export default function ShiftSwaps() {
     } catch (err) { alert(err.message); } finally { setSaving(false); }
   }
 
-  const guardMap = Object.fromEntries(guards.map(g => [g.id, g]));
   return (
     <div>
       <PageHeader title="Shift Swaps" subtitle="Review swap requests from guards" />
@@ -50,7 +53,9 @@ export default function ShiftSwaps() {
         ))}
       </div>
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !swaps.length ? <EmptyState icon={ArrowLeftRight} title={`No ${filter || ''} swap requests`} /> : (
           <div className="card p-0 overflow-hidden">
             <div className="overflow-x-auto">
@@ -62,10 +67,10 @@ export default function ShiftSwaps() {
                   {swaps.map(s => (
                     <tr key={s.id} className="hover:bg-gray-50/50 transition-colors">
                       <td className="table-cell">
-                        <p className="text-gray-900 text-sm font-medium">{guardMap[s.requester_id]?.full_name || s.requester_id?.slice(0,8)}</p>
+                        <p className="text-gray-900 text-sm font-medium">{s.requester_name || s.requester_id?.slice(0,8)}</p>
                       </td>
                       <td className="table-cell text-sm text-gray-700">
-                        {s.volunteer_id ? guardMap[s.volunteer_id]?.full_name || s.volunteer_id?.slice(0,8) : <span className="text-gray-400 italic">None yet</span>}
+                        {s.volunteer_id ? s.volunteer_name || s.volunteer_id?.slice(0,8) : <span className="text-gray-400 italic">None yet</span>}
                       </td>
                       <td className="table-cell text-xs text-gray-600 font-medium">
                         {s.start ? format(parseISO(s.start), 'MMM d, HH:mm') : '—'}
@@ -95,8 +100,8 @@ export default function ShiftSwaps() {
         <Modal title="Review Swap Request" onClose={() => setDecisionModal(null)}>
           <div className="space-y-4">
             <div className="bg-gray-50 border border-gray-100 rounded-lg p-4 space-y-3 text-sm">
-              <div className="flex justify-between items-center"><span className="text-gray-500 font-medium">Requester</span><span className="text-gray-900 font-bold">{guardMap[decisionModal.requester_id]?.full_name}</span></div>
-              <div className="flex justify-between items-center"><span className="text-gray-500 font-medium">Volunteer</span><span className="text-gray-900 font-bold">{guardMap[decisionModal.volunteer_id]?.full_name}</span></div>
+              <div className="flex justify-between items-center"><span className="text-gray-500 font-medium">Requester</span><span className="text-gray-900 font-bold">{decisionModal.requester_name || decisionModal.requester_id}</span></div>
+              <div className="flex justify-between items-center"><span className="text-gray-500 font-medium">Volunteer</span><span className="text-gray-900 font-bold">{decisionModal.volunteer_name || decisionModal.volunteer_id}</span></div>
               {decisionModal.reason && <div className="flex justify-between items-start pt-2 border-t border-gray-200 mt-2"><span className="text-gray-500 font-medium w-24">Reason</span><span className="text-gray-700 italic text-right flex-1">{decisionModal.reason}</span></div>}
             </div>
             <div>

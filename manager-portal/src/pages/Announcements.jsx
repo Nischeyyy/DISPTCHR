@@ -3,10 +3,12 @@ import { api } from '../api/client.js';
 import PageHeader from '../components/PageHeader.jsx';
 import Modal from '../components/Modal.jsx';
 import EmptyState from '../components/EmptyState.jsx';
+import LoadFailure from '../components/LoadFailure.jsx';
 import { Megaphone, Plus, Trash2, AlertTriangle } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import { announcementPayload } from '../domain/adminForms.js';
 
-const EMPTY = { title: '', body: '', priority: 'normal', site_id: '' };
+const EMPTY = { title: '', body: '', severity: 'info', site_id: '' };
 
 export default function Announcements() {
   const [announcements, setAnnouncements] = useState([]);
@@ -18,19 +20,24 @@ export default function Announcements() {
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null); // announcement object to delete
   const [deleting, setDeleting] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   async function load() {
-    const [ad, sd] = await Promise.all([api.announcements(), api.sites()]);
-    setAnnouncements(ad.announcements || []);
-    setSites(sd.sites || []);
-    setLoading(false);
+    try {
+      const [ad, sd] = await Promise.all([api.announcements(), api.announcementSites()]);
+      setAnnouncements(ad.announcements || []);
+      setSites(sd.sites || []);
+      setLoadError('');
+    } catch (reason) {
+      setLoadError(reason.message || 'Unable to load announcements.');
+    } finally { setLoading(false); }
   }
   useEffect(() => { load(); }, []);
 
   async function handleSave(e) {
     e.preventDefault(); setSaving(true); setError('');
     try {
-      await api.createAnnouncement({ ...form, site_id: form.site_id || undefined });
+      await api.createAnnouncement(announcementPayload(form));
       setModal(false); await load();
     } catch (err) { setError(err.message); } finally { setSaving(false); }
   }
@@ -48,25 +55,27 @@ export default function Announcements() {
   const siteMap = Object.fromEntries(sites.map(s => [s.id, s]));
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }));
 
-  const priorityBg = { urgent: 'border-red-200 bg-red-50', high: 'border-orange-200 bg-orange-50', normal: 'border-gray-200 bg-white' };
+  const severityBg = { critical: 'border-red-200 bg-red-50', warning: 'border-orange-200 bg-orange-50', info: 'border-gray-200 bg-white' };
 
   return (
     <div>
       <PageHeader title="Announcements" subtitle="Broadcast messages to guards"
         action={<button className="btn-primary flex items-center gap-2" onClick={() => { setForm(EMPTY); setError(''); setModal(true); }}><Plus size={16} /> New Announcement</button>} />
 
-      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : (
+      {loading ? <div className="text-gray-400 text-sm">Loading…</div> : loadError ? (
+        <LoadFailure message={loadError} onRetry={() => { setLoading(true); load(); }} />
+      ) : (
         !announcements.length ? <EmptyState icon={Megaphone} title="No announcements yet" subtitle="Post a message to all guards" /> : (
           <div className="space-y-4">
             {announcements.map(ann => (
-              <div key={ann.id} className={`card ${priorityBg[ann.priority] || priorityBg.normal} shadow-sm transition-all hover:shadow-md`}>
+              <div key={ann.id} className={`card ${severityBg[ann.severity] || severityBg.info} shadow-sm transition-all hover:shadow-md`}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 mb-2 flex-wrap">
                       <h3 className="font-bold text-gray-900 text-lg">{ann.title}</h3>
-                      {ann.priority && ann.priority !== 'normal' && (
-                        <span className={`badge ${ann.priority === 'urgent' ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-orange-100 text-orange-700 border border-orange-200'}`}>
-                          {ann.priority.toUpperCase()}
+                      {ann.severity && ann.severity !== 'info' && (
+                        <span className={`badge ${ann.severity === 'critical' ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-orange-100 text-orange-700 border border-orange-200'}`}>
+                          {ann.severity.toUpperCase()}
                         </span>
                       )}
                       {ann.site_id && <span className="badge bg-blue-100 text-blue-700 border border-blue-200">{siteMap[ann.site_id]?.name || 'Site-specific'}</span>}
@@ -142,10 +151,10 @@ export default function Announcements() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="label">Priority</label>
-                <select className="input" value={form.priority} onChange={f('priority')}>
-                  <option value="normal">Normal</option>
-                  <option value="high">High</option>
-                  <option value="urgent">Urgent</option>
+                <select className="input" value={form.severity} onChange={f('severity')}>
+                  <option value="info">Normal</option>
+                  <option value="warning">High</option>
+                  <option value="critical">Urgent</option>
                 </select>
               </div>
               <div>
