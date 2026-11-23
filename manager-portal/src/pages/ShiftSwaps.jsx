@@ -6,11 +6,12 @@ import EmptyState from '../components/EmptyState.jsx';
 import Modal from '../components/Modal.jsx';
 import { ArrowLeftRight, Check, X } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import { canReviewSwap, DEFAULT_SWAP_FILTER, SWAP_FILTERS } from '../domain/shiftSwaps.js';
 
 export default function ShiftSwaps() {
   const [swaps, setSwaps] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('pending');
+  const [filter, setFilter] = useState(DEFAULT_SWAP_FILTER);
   const [guards, setGuards] = useState([]);
   const [decisionModal, setDecisionModal] = useState(null);
   const [reason, setReason] = useState('');
@@ -35,18 +36,16 @@ export default function ShiftSwaps() {
   }
 
   const guardMap = Object.fromEntries(guards.map(g => [g.id, g]));
-  const tabs = ['pending', 'approved', 'rejected', ''];
-
   return (
     <div>
       <PageHeader title="Shift Swaps" subtitle="Review swap requests from guards" />
 
       {/* Filter tabs */}
       <div className="flex gap-2 mb-5">
-        {tabs.map(t => (
-          <button key={t} onClick={() => setFilter(t)}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${filter === t ? 'bg-gray-900 text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
-            {t ? t.charAt(0).toUpperCase() + t.slice(1) : 'All'}
+        {SWAP_FILTERS.map(tab => (
+          <button key={tab.value || 'all'} onClick={() => setFilter(tab.value)}
+            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${filter === tab.value ? 'bg-gray-900 text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+            {tab.label}
           </button>
         ))}
       </div>
@@ -69,14 +68,14 @@ export default function ShiftSwaps() {
                         {s.volunteer_id ? guardMap[s.volunteer_id]?.full_name || s.volunteer_id?.slice(0,8) : <span className="text-gray-400 italic">None yet</span>}
                       </td>
                       <td className="table-cell text-xs text-gray-600 font-medium">
-                        {s.shift_start ? format(parseISO(s.shift_start), 'MMM d, HH:mm') : '—'}
+                        {s.start ? format(parseISO(s.start), 'MMM d, HH:mm') : '—'}
                       </td>
                       <td className="table-cell text-xs text-gray-500">
-                        {s.requested_at ? format(parseISO(s.requested_at), 'MMM d') : '—'}
+                        {s.created_at ? format(parseISO(s.created_at), 'MMM d') : '—'}
                       </td>
                       <td className="table-cell"><Badge status={s.status} /></td>
                       <td className="table-cell">
-                        {s.status === 'pending' && s.volunteer_id && (
+                        {canReviewSwap(s) && (
                           <button onClick={() => { setDecisionModal(s); setReason(''); }}
                             className="text-xs bg-gray-900 text-white hover:bg-gray-700 px-3 py-1.5 rounded-lg transition-colors font-medium">
                             Review

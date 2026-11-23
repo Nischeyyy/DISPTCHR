@@ -3,6 +3,7 @@ const COLORS = {
   inactive:     'text-gray-500',
   submitted:    'text-yellow-700',
   open:         'text-blue-600',
+  accepted:     'text-yellow-700',
   approved:     'text-green-600',
   rejected:     'text-red-600',
   pending:      'text-yellow-700',

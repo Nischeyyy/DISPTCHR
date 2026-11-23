@@ -19,7 +19,7 @@ From the parent workspace, run `npm run dev`. This starts the existing repositor
 
 The guard product is a native iOS/Android application, not a production web application. Use Expo Go or a development build from `frontend/`.
 
-Local secrets are generated into ignored files by `python3 scripts/setup-dev-env.py`. Public registration is disabled by default; the runtime contains no demo-data seeder.
+The backend requires Python 3.11 or newer; production and CI use Python 3.12. Local secrets are generated into ignored files by `python3 scripts/setup-dev-env.py`. Public registration is disabled by default; the runtime contains no demo-data seeder.
 
 ## Security model
 

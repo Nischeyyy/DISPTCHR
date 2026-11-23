@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Linking } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Linking, Modal, TextInput } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -30,6 +30,10 @@ export default function ShiftDetail() {
   const [s, setS] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [acking, setAcking] = useState(false);
+  const [swapModal, setSwapModal] = useState(false);
+  const [swapReason, setSwapReason] = useState("");
+  const [swapError, setSwapError] = useState("");
+  const [submittingSwap, setSubmittingSwap] = useState(false);
 
   const load = useCallback(async () => {
     try { const d: any = await api(`/shifts/${id}`); setS(d); } catch {}
@@ -44,6 +48,24 @@ export default function ShiftDetail() {
       setS((prev: any) => ({ ...prev, instructions_acknowledged: true }));
     } catch {}
     setAcking(false);
+  };
+
+  const submitSwapRequest = async () => {
+    setSubmittingSwap(true);
+    setSwapError("");
+    try {
+      await api(`/shifts/${id}/request-swap`, {
+        method: "POST",
+        body: { reason: swapReason.trim() || null },
+      });
+      setSwapModal(false);
+      setSwapReason("");
+      router.push("/shift-swaps" as any);
+    } catch (error: any) {
+      setSwapError(error.message || "Unable to submit the swap request");
+    } finally {
+      setSubmittingSwap(false);
+    }
   };
 
   if (loading || !s) return <SafeAreaView style={styles.safe}><ActivityIndicator color={C.textSecondary} style={{ marginTop: 40 }} /></SafeAreaView>;
@@ -132,7 +154,7 @@ export default function ShiftDetail() {
             <Button testID="clock-in-shift" label="Go to Time Clock"
               onPress={() => router.push({ pathname: "/timeclock", params: { shift_id: s.id } })} />
             <Button testID="request-swap-btn" variant="secondary" label="Request Shift Swap"
-              onPress={() => router.push("/shift-swaps" as any)} />
+              onPress={() => { setSwapError(""); setSwapModal(true); }} />
           </View>
         )}
 
@@ -145,6 +167,36 @@ export default function ShiftDetail() {
           </View>
         )}
       </ScrollView>
+      <Modal visible={swapModal} transparent animationType="fade" onRequestClose={() => { if (!submittingSwap) setSwapModal(false); }}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Request Shift Swap</Text>
+            <Text style={styles.modalCopy}>Post this scheduled shift to the guard marketplace. A manager must approve the transfer after another guard volunteers.</Text>
+            <Text style={styles.modalLabel}>Reason (optional)</Text>
+            <TextInput
+              testID="swap-reason"
+              style={styles.reasonInput}
+              value={swapReason}
+              onChangeText={setSwapReason}
+              placeholder="Explain why you need coverage"
+              placeholderTextColor={C.textTertiary}
+              multiline
+              maxLength={500}
+              editable={!submittingSwap}
+            />
+            <Text style={styles.characterCount}>{swapReason.length}/500</Text>
+            {swapError ? <Text style={styles.modalError}>{swapError}</Text> : null}
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancel} disabled={submittingSwap} onPress={() => setSwapModal(false)}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable testID="submit-swap-request" style={[styles.modalSubmit, submittingSwap && styles.disabled]} disabled={submittingSwap} onPress={submitSwapRequest}>
+                {submittingSwap ? <ActivityIndicator color="#FFFFFF" size="small" /> : <Text style={styles.modalSubmitText}>Post Request</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -184,4 +236,18 @@ const styles = StyleSheet.create({
   ackedText: { color: C.textSecondary, fontSize: 13 },
   completedBanner: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "rgba(34,197,94,0.1)", borderRadius: 14, padding: 14, marginTop: 20 },
   completedText: { color: "#22C55E", fontSize: 14, fontWeight: "600" },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 24 },
+  modalCard: { backgroundColor: C.card, borderRadius: 18, padding: 20 },
+  modalTitle: { color: C.text, fontSize: 20, fontWeight: "700" },
+  modalCopy: { color: C.textSecondary, fontSize: 14, lineHeight: 20, marginTop: 8 },
+  modalLabel: { color: C.text, fontSize: 13, fontWeight: "600", marginTop: 18, marginBottom: 8 },
+  reasonInput: { minHeight: 100, borderWidth: 1, borderColor: C.border, borderRadius: 12, padding: 12, color: C.text, fontSize: 15, textAlignVertical: "top" },
+  characterCount: { color: C.textTertiary, fontSize: 11, textAlign: "right", marginTop: 5 },
+  modalError: { color: "#DC2626", fontSize: 13, marginTop: 8 },
+  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 18 },
+  modalCancel: { borderWidth: 1, borderColor: C.border, borderRadius: 10, paddingHorizontal: 18, paddingVertical: 12 },
+  modalCancelText: { color: C.text, fontSize: 14, fontWeight: "600" },
+  modalSubmit: { minWidth: 124, alignItems: "center", backgroundColor: C.accent, borderRadius: 10, paddingHorizontal: 18, paddingVertical: 12 },
+  modalSubmitText: { color: "#FFFFFF", fontSize: 14, fontWeight: "700" },
+  disabled: { opacity: 0.6 },
 });

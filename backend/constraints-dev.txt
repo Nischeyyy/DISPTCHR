@@ -1,2 +1,1 @@
-# Python-version-specific runtime pins live in requirements.txt so local
-# Python 3.9 and production Python 3.12 resolve the appropriate wheel safely.
+# Runtime dependencies are pinned in requirements.txt for supported Python 3.11+ environments.

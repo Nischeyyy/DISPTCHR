@@ -21,6 +21,10 @@ ADMIN_EMAIL = os.environ.get("DISPTCHR_E2E_MANAGER_EMAIL", "")
 ADMIN_PASSWORD = os.environ.get("DISPTCHR_E2E_MANAGER_PASSWORD", "")
 ADMIN_MFA_CODE = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_CODE", "")
 ADMIN_MFA_SECRET = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_SECRET", "")
+ADMIN_RECOVERY_CODE = ""
+SECOND_GUARD_EMAIL = ""
+SECOND_GUARD_PASSWORD = ""
+SWAP_SHIFT_ID = ""
 BOOTSTRAP_DISPOSABLE = os.environ.get("DISPTCHR_E2E_BOOTSTRAP") == "1"
 CONTROL_KEY = os.environ.get("CONTROL_PANEL_API_KEY", "")
 E2E_ORIGIN = os.environ.get("DISPTCHR_E2E_ORIGIN", "http://127.0.0.1:5050")
@@ -61,11 +65,14 @@ def bootstrap_disposable_environment(session):
         return
 
     global GUARD_EMAIL, GUARD_PASSWORD, ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_MFA_SECRET
+    global ADMIN_RECOVERY_CODE, SECOND_GUARD_EMAIL, SECOND_GUARD_PASSWORD, SWAP_SHIFT_ID
     assert BASE_URL and CONTROL_KEY, "Disposable E2E bootstrap requires its API URL and control key"
     GUARD_EMAIL = "guard.e2e@skyhawksecurity.ca"
     GUARD_PASSWORD = "Guard-E2E-password-2026"
     ADMIN_EMAIL = "manager.e2e@skyhawksecurity.ca"
     ADMIN_PASSWORD = "Manager-E2E-password-2026"
+    SECOND_GUARD_EMAIL = "guard.cover.e2e@skyhawksecurity.ca"
+    SECOND_GUARD_PASSWORD = "Guard-Cover-E2E-password-2026"
 
     control_headers = {
         "x-disptchr-control-key": CONTROL_KEY,
@@ -85,6 +92,7 @@ def bootstrap_disposable_environment(session):
         },
     ), 201)
     ADMIN_MFA_SECRET = manager["mfa_setup"]["secret"]
+    ADMIN_RECOVERY_CODE = manager["mfa_setup"]["recovery_codes"][1]
 
     # Use a one-time recovery code for setup so the TOTP remains unused for the login test.
     expect(session.post(
@@ -106,6 +114,19 @@ def bootstrap_disposable_environment(session):
             "phone": "+14165550100",
             "employee_number": "E2E-GUARD-001",
             "licence_number": "E2E-LIC-001",
+            "licence_expiry": expiry,
+            "certifications": ["First Aid"],
+        },
+    ), 201)
+    expect(session.post(
+        f"{BASE_URL}/api/admin/guards",
+        json={
+            "email": SECOND_GUARD_EMAIL,
+            "password": SECOND_GUARD_PASSWORD,
+            "full_name": "E2E Cover Guard",
+            "phone": "+14165550102",
+            "employee_number": "E2E-GUARD-002",
+            "licence_number": "E2E-LIC-002",
             "licence_expiry": expiry,
             "certifications": ["First Aid"],
         },
@@ -136,6 +157,18 @@ def bootstrap_disposable_environment(session):
             "pay_rate": 25.0,
         },
     ), 201)
+    swap_shift = expect(session.post(
+        f"{BASE_URL}/api/admin/shifts",
+        json={
+            "user_id": guard["id"],
+            "site_id": site["id"],
+            "start": (now + timedelta(days=2)).isoformat(),
+            "end": (now + timedelta(days=2, hours=8)).isoformat(),
+            "role": "Swap Coverage",
+            "pay_rate": 25.0,
+        },
+    ), 201)
+    SWAP_SHIFT_ID = swap_shift["id"]
     expect(session.post(
         f"{BASE_URL}/api/admin/open-shifts",
         json={
@@ -313,6 +346,59 @@ class TestOpenShifts:
         r5 = session.post(f"{BASE_URL}/api/open-shifts/{sid}/cancel-claim", headers=guard_headers)
         assert r5.status_code == 200
         assert r5.json()["status"] == "cancelled"
+
+
+# ---- shift swaps ----
+class TestShiftSwaps:
+    def test_request_volunteer_and_manager_approval(self, session, guard_headers):
+        created = expect(session.post(
+            f"{BASE_URL}/api/shifts/{SWAP_SHIFT_ID}/request-swap",
+            headers=guard_headers,
+            json={"reason": "Disposable end-to-end coverage request."},
+        ), 201)
+        assert created["status"] == "open"
+        assert created["reason"] == "Disposable end-to-end coverage request."
+
+        duplicate = session.post(
+            f"{BASE_URL}/api/shifts/{SWAP_SHIFT_ID}/request-swap",
+            headers=guard_headers,
+            json={"reason": "Duplicate request must be rejected."},
+        )
+        assert duplicate.status_code == 400
+
+        own = expect(session.get(f"{BASE_URL}/api/shift-swaps", headers=guard_headers), 200)
+        assert any(item["id"] == created["id"] and item["status"] == "open" for item in own["own"])
+
+        covering_guard = expect(session.post(
+            f"{BASE_URL}/api/auth/login",
+            json={"email": SECOND_GUARD_EMAIL, "password": SECOND_GUARD_PASSWORD},
+        ), 200)
+        covering_headers = {"Authorization": f"Bearer {covering_guard['access_token']}"}
+        marketplace = expect(session.get(f"{BASE_URL}/api/shift-swaps", headers=covering_headers), 200)
+        assert any(item["id"] == created["id"] for item in marketplace["marketplace"])
+        expect(session.post(
+            f"{BASE_URL}/api/shift-swaps/{created['id']}/volunteer",
+            headers=covering_headers,
+        ), 200)
+
+        manager_headers = {"Content-Type": "application/json", "Origin": E2E_ORIGIN}
+        with httpx.Client(timeout=20.0, headers=manager_headers) as manager_session:
+            expect(manager_session.post(
+                f"{BASE_URL}/api/auth/manager-login",
+                json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "mfa_code": ADMIN_RECOVERY_CODE},
+            ), 200)
+            awaiting = expect(manager_session.get(f"{BASE_URL}/api/admin/shift-swaps?status=accepted"), 200)
+            assert any(item["id"] == created["id"] for item in awaiting["swaps"])
+            expect(manager_session.post(
+                f"{BASE_URL}/api/admin/shift-swaps/{created['id']}/decision",
+                json={"action": "approve", "reason": "Coverage verified by the E2E manager."},
+            ), 200)
+            approved = expect(manager_session.get(f"{BASE_URL}/api/admin/shift-swaps?status=approved"), 200)
+            completed = next(item for item in approved["swaps"] if item["id"] == created["id"])
+            assert completed["manager_note"] == "Coverage verified by the E2E manager."
+
+        expect(session.get(f"{BASE_URL}/api/shifts/{SWAP_SHIFT_ID}", headers=covering_headers), 200)
+        assert session.get(f"{BASE_URL}/api/shifts/{SWAP_SHIFT_ID}", headers=guard_headers).status_code == 404
 
 
 # ---- time clock ----

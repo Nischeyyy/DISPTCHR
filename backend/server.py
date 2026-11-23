@@ -32,7 +32,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr, Field
 from pymongo import ReturnDocument
-from pymongo.errors import PyMongoError, ServerSelectionTimeoutError  # noqa: F401
+from pymongo.errors import DuplicateKeyError, PyMongoError, ServerSelectionTimeoutError  # noqa: F401
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -552,6 +552,7 @@ class SwapRequestIn(BaseModel):
 
 class SwapActionIn(BaseModel):
     action: str  # approve | reject
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 class PayrollCalculateIn(BaseModel):
@@ -766,6 +767,26 @@ async def ensure_indexes():
     await db.sos_alerts.create_index([("status", 1), ("created_at", -1)])
     await db.shift_swaps.create_index("id", unique=True)
     await db.shift_swaps.create_index([("status", 1), ("start", 1)])
+    duplicate_active_swaps = await db.shift_swaps.aggregate([
+        {"$match": {"status": {"$in": ["open", "accepted", "processing"]}}},
+        {"$group": {"_id": "$shift_id", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gt": 1}}},
+        {"$limit": 1},
+    ]).to_list(1)
+    if duplicate_active_swaps:
+        raise RuntimeError(
+            f"Multiple active swap requests exist for shift {duplicate_active_swaps[0]['_id']}; "
+            "resolve the conflicting records before starting the API"
+        )
+    await db.shift_swaps.update_many(
+        {"status": {"$in": ["open", "accepted", "processing"]}},
+        [{"$set": {"active_shift_id": "$shift_id"}}],
+    )
+    await db.shift_swaps.update_many(
+        {"status": {"$nin": ["open", "accepted", "processing"]}, "active_shift_id": {"$exists": True}},
+        {"$unset": {"active_shift_id": ""}},
+    )
+    await db.shift_swaps.create_index("active_shift_id", unique=True, sparse=True)
     await db.location_pings.create_index([("timeclock_id", 1), ("ts", -1)])
     await db.community_posts.create_index("id", unique=True)
     await db.community_posts.create_index([("type", 1), ("created_at", -1)])
@@ -3213,7 +3234,7 @@ async def request_swap(shift_id: str, body: SwapRequestIn, user=Depends(get_curr
         raise HTTPException(404, "Shift not found or not yours")
     if shift.get("status") not in ("scheduled",):
         raise HTTPException(400, "Only scheduled shifts can be swapped")
-    existing = await db.shift_swaps.find_one({"shift_id": shift_id, "status": "open"})
+    existing = await db.shift_swaps.find_one({"shift_id": shift_id, "status": {"$in": ["open", "accepted", "processing"]}})
     if existing:
         raise HTTPException(400, "A swap request for this shift already exists")
     site = None
@@ -3232,13 +3253,18 @@ async def request_swap(shift_id: str, body: SwapRequestIn, user=Depends(get_curr
         "pay_rate": shift.get("pay_rate"),
         "reason": body.reason,
         "status": "open",
+        "active_shift_id": shift_id,
         "volunteer_id": None,
         "volunteer_name": None,
         "created_at": iso(now_utc()),
         "resolved_at": None,
     }
-    await db.shift_swaps.insert_one(swap)
+    try:
+        await db.shift_swaps.insert_one(swap)
+    except DuplicateKeyError as exc:
+        raise HTTPException(400, "An active swap request for this shift already exists") from exc
     swap.pop("_id", None)
+    swap.pop("active_shift_id", None)
     managers = await active_managers_with_permission("scheduling.manage", {"id": 1, "_id": 0})
     admin_ids = [manager["id"] for manager in managers]
     await send_push(admin_ids, {"title": "Shift Swap Requested", "message": f"{user['full_name']} wants to swap their {shift['start'][:10]} shift."})
@@ -3247,9 +3273,9 @@ async def request_swap(shift_id: str, body: SwapRequestIn, user=Depends(get_curr
 
 @api.get("/shift-swaps")
 async def list_shift_swaps(user=Depends(get_current_user)):
-    own = await db.shift_swaps.find({"requester_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    own = await db.shift_swaps.find({"requester_id": user["id"]}, {"_id": 0, "active_shift_id": 0}).sort("created_at", -1).to_list(50)
     marketplace = await db.shift_swaps.find(
-        {"status": "open", "requester_id": {"$ne": user["id"]}}, {"_id": 0}
+        {"status": "open", "requester_id": {"$ne": user["id"]}}, {"_id": 0, "active_shift_id": 0}
     ).sort("start", 1).to_list(50)
     return {"own": own, "marketplace": marketplace}
 
@@ -3261,10 +3287,13 @@ async def volunteer_swap(swap_id: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Swap not found or no longer open")
     if swap["requester_id"] == user["id"]:
         raise HTTPException(400, "Cannot volunteer for your own swap")
-    await db.shift_swaps.update_one(
-        {"id": swap_id},
+    swap = await db.shift_swaps.find_one_and_update(
+        {"id": swap_id, "status": "open"},
         {"$set": {"status": "accepted", "volunteer_id": user["id"], "volunteer_name": user["full_name"]}},
+        return_document=ReturnDocument.AFTER,
     )
+    if not swap:
+        raise HTTPException(409, "Another guard already volunteered for this swap")
     managers = await active_managers_with_permission("scheduling.manage", {"id": 1, "_id": 0})
     admin_ids = [manager["id"] for manager in managers]
     await send_push(
@@ -3278,7 +3307,7 @@ async def volunteer_swap(swap_id: str, user=Depends(get_current_user)):
 async def cancel_swap(swap_id: str, user=Depends(get_current_user)):
     r = await db.shift_swaps.update_one(
         {"id": swap_id, "requester_id": user["id"], "status": {"$in": ["open", "accepted"]}},
-        {"$set": {"status": "cancelled", "resolved_at": iso(now_utc())}},
+        {"$set": {"status": "cancelled", "resolved_at": iso(now_utc())}, "$unset": {"active_shift_id": ""}},
     )
     if r.matched_count == 0:
         raise HTTPException(404, "Swap not found or cannot be cancelled")
@@ -3289,13 +3318,32 @@ async def cancel_swap(swap_id: str, user=Depends(get_current_user)):
 async def admin_swap_decision(swap_id: str, body: SwapActionIn, admin=Depends(require_admin)):
     if body.action not in ("approve", "reject"):
         raise HTTPException(400, "action must be 'approve' or 'reject'")
-    swap = await db.shift_swaps.find_one({"id": swap_id, "status": "accepted"})
+    swap = await db.shift_swaps.find_one_and_update(
+        {"id": swap_id, "status": "accepted"},
+        {"$set": {"status": "processing", "decision_started_at": iso(now_utc()), "decision_started_by": admin["id"]}},
+        return_document=ReturnDocument.BEFORE,
+    )
     if not swap:
         raise HTTPException(404, "Swap not found or not in 'accepted' state")
     both_ids = [swap["requester_id"], swap["volunteer_id"]]
     if body.action == "approve":
-        await db.shifts.update_one({"id": swap["shift_id"]}, {"$set": {"user_id": swap["volunteer_id"], "swapped_from": swap["requester_id"]}})
-        await db.shift_swaps.update_one({"id": swap_id}, {"$set": {"status": "approved", "resolved_at": iso(now_utc()), "approved_by": admin["id"]}})
+        transfer = await db.shifts.update_one(
+            {"id": swap["shift_id"], "user_id": swap["requester_id"], "status": "scheduled"},
+            {"$set": {"user_id": swap["volunteer_id"], "swapped_from": swap["requester_id"]}},
+        )
+        if transfer.matched_count == 0:
+            await db.shift_swaps.update_one(
+                {"id": swap_id, "status": "processing"},
+                {"$set": {"status": "accepted"}, "$unset": {"decision_started_at": "", "decision_started_by": ""}},
+            )
+            raise HTTPException(409, "The assigned shift changed before this decision could be applied")
+        await db.shift_swaps.update_one(
+            {"id": swap_id, "status": "processing"},
+            {"$set": {
+                "status": "approved", "resolved_at": iso(now_utc()), "approved_by": admin["id"],
+                "manager_note": body.reason,
+            }, "$unset": {"active_shift_id": "", "decision_started_at": "", "decision_started_by": ""}},
+        )
         await send_push(
             both_ids,
             {"title": "Shift Swap Approved ✓", "message": f"The {swap['start'][:10]} shift has been transferred to {swap['volunteer_name']}."},
@@ -3305,14 +3353,20 @@ async def admin_swap_decision(swap_id: str, body: SwapActionIn, admin=Depends(re
         vol_user = await db.users.find_one({"id": swap["volunteer_id"]},  {"phone": 1, "_id": 0})
         await asyncio.gather(
             queue_sms(req_user["phone"], f"Skyhawk: Your swap request for {swap['start'][:10]} was APPROVED. You're now off this shift.",
-                f"swap:{swap_id}:approved:sms:{req_user['id']}") if req_user and req_user.get("phone") else asyncio.sleep(0),
+                f"swap:{swap_id}:approved:sms:{swap['requester_id']}") if req_user and req_user.get("phone") else asyncio.sleep(0),
             queue_sms(vol_user["phone"], f"Skyhawk: Shift swap APPROVED — you're now working {swap['start'][:10]}.",
-                f"swap:{swap_id}:approved:sms:{vol_user['id']}") if vol_user and vol_user.get("phone") else asyncio.sleep(0),
+                f"swap:{swap_id}:approved:sms:{swap['volunteer_id']}") if vol_user and vol_user.get("phone") else asyncio.sleep(0),
             notif.save_inapp(db, both_ids, "Shift Swap Approved ✓", f"The {swap['start'][:10]} shift has been transferred to {swap['volunteer_name']}.", category="swap"),
             return_exceptions=True,
         )
     else:
-        await db.shift_swaps.update_one({"id": swap_id}, {"$set": {"status": "rejected", "resolved_at": iso(now_utc()), "rejected_by": admin["id"]}})
+        await db.shift_swaps.update_one(
+            {"id": swap_id, "status": "processing"},
+            {"$set": {
+                "status": "rejected", "resolved_at": iso(now_utc()), "rejected_by": admin["id"],
+                "manager_note": body.reason,
+            }, "$unset": {"active_shift_id": "", "decision_started_at": "", "decision_started_by": ""}},
+        )
         await send_push(
             both_ids,
             {"title": "Shift Swap Rejected", "message": f"The swap request for {swap['start'][:10]} was not approved."},
@@ -3326,7 +3380,7 @@ async def admin_list_swaps(admin=Depends(require_admin), status: Optional[str] =
     q: dict = {}
     if status:
         q["status"] = status
-    swaps = await db.shift_swaps.find(q, {"_id": 0}).sort("created_at", -1).to_list(100)
+    swaps = await db.shift_swaps.find(q, {"_id": 0, "active_shift_id": 0}).sort("created_at", -1).to_list(100)
     return {"swaps": swaps}
 
 

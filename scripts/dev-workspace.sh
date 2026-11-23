@@ -140,8 +140,13 @@ fi
 
 if [ ! -x "$DISPTCHR_DIR/.venv/bin/uvicorn" ]; then
   echo "DISPTCHR backend dependencies are missing. Run:"
-  echo "  python3 -m venv DISPTCHR/.venv"
+  echo "  python3.11 -m venv DISPTCHR/.venv"
   echo "  DISPTCHR/.venv/bin/pip install -r DISPTCHR/backend/requirements-dev.txt"
+  exit 1
+fi
+
+if ! "$DISPTCHR_DIR/.venv/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  echo "DISPTCHR requires Python 3.11 or newer. Recreate DISPTCHR/.venv with python3.11 or python3.12."
   exit 1
 fi
 

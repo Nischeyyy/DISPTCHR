@@ -138,6 +138,9 @@ export default function ShiftSwaps() {
                   {s.reason ? (
                     <Text style={styles.cardReason}>Reason: “{s.reason}”</Text>
                   ) : null}
+                  {s.manager_note ? (
+                    <Text style={styles.managerNote}>Manager note: “{s.manager_note}”</Text>
+                  ) : null}
                   {s.volunteer_name && s.status === "accepted" && (
                     <View style={styles.volunteerRow}>
                       <Ionicons name="person-outline" size={13} color={theme.colors.accent} />
@@ -265,6 +268,7 @@ const styles = StyleSheet.create({
   cardPay: { color: theme.colors.text, fontSize: 18, fontWeight: "600" },
   cardSite: { color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 },
   cardReason: { color: theme.colors.textTertiary, fontSize: 13, fontStyle: "italic", marginTop: 6 },
+  managerNote: { color: theme.colors.textSecondary, fontSize: 13, fontStyle: "italic", marginTop: 6 },
   postedBy: { color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 },
   volunteerRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10 },
   volunteerText: { color: theme.colors.accent, fontSize: 13 },

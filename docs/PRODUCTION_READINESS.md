@@ -1,6 +1,6 @@
 # Production readiness report
 
-**Assessment date:** 2026-11-20  
+**Assessment date:** 2026-11-23
 **Scope:** `Nischeyyy/DISPTCHR` workforce API, Manager Portal, guard application, and the integrated `Nischeyyy/disptchr-panel` directors' website.
 
 ## Release decision
@@ -14,9 +14,9 @@ No fake business records, demo accounts, default passwords, or development authe
 | Area | Result | Evidence |
 | --- | --- | --- |
 | Workforce backend syntax | Green | all production Python modules compile |
-| Backend security scan | Green | Bandit reports no findings |
-| Backend automated tests | Green | 45 core tests passed; 22 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
-| Manager Portal | Green | 3 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
+| Backend security scan | Green | Bandit reports no findings; the production Python dependency audit reports 0 known vulnerabilities |
+| Backend automated tests | Green | 45 core tests passed; 23 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
+| Manager Portal | Green | 6 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Disptchr Panel database | Green | schema v6 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
 | Disptchr Panel | Green | TypeScript passed; 5 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Guard application | Green | lint and TypeScript passed; Expo Doctor 20/20; dependency audit reports 0 vulnerabilities |
@@ -38,6 +38,7 @@ No fake business records, demo accounts, default passwords, or development authe
 ### Workforce operations
 
 - Guard onboarding, assigned schedules, shift details and acknowledgement, open-shift claiming, shift swaps, timeclock, breaks, geofencing, location heartbeat, selfie verification, incidents, SOS, announcements, community, payroll views, credentials, notifications, and password recovery are connected to the API and database.
+- Shift swaps now cover the complete guarded lifecycle: a guard posts a specific assigned shift with an optional reason, another guard volunteers, a scheduling manager reviews the accepted request under a single-winner decision lock, the assignment transfers, both guards receive the recorded decision, and duplicate active requests are blocked by a database invariant.
 - Time Clock resolves a real assigned shift even when opened directly, displays the assignment, blocks capture outside the allowed window, and is independently revalidated by the API.
 - Manager Portal provides permission-controlled guards, sites, shifts, open shifts, timeclock, live locations, incidents, SOS, announcements, compliance, shift swaps, and payroll workflows.
 - Durable email, SMS, and Expo notification jobs use leases, retry/backoff, retention, dead-letter state, and a separately monitored worker.
