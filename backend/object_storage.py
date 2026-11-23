@@ -75,6 +75,13 @@ class ObjectStorage:
         body = await asyncio.to_thread(response["Body"].read)
         return body, response.get("ContentType")
 
+    async def delete(self, key: str) -> None:
+        if self.backend == "local":
+            path = self._local_path(key)
+            await asyncio.to_thread(path.unlink, missing_ok=True)
+            return
+        await asyncio.to_thread(self._s3().delete_object, Bucket=self.bucket, Key=key)
+
     async def healthcheck(self) -> None:
         if self.backend == "local":
             self.root.mkdir(parents=True, exist_ok=True)

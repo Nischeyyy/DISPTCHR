@@ -362,13 +362,27 @@ class TestOpenShifts:
         # verify appears in schedule as claimed_from_open
         r3 = session.get(f"{BASE_URL}/api/my-claims", headers=guard_headers)
         assert r3.status_code == 200
+        assert any(claim["claimed_from_open"] == sid for claim in r3.json()["claims"])
+        covering_guard = expect(session.post(
+            f"{BASE_URL}/api/auth/login",
+            json={"email": SECOND_GUARD_EMAIL, "password": SECOND_GUARD_PASSWORD},
+        ), 200)
+        covering_headers = {"Authorization": f"Bearer {covering_guard['access_token']}"}
+        waitlisted = expect(session.post(
+            f"{BASE_URL}/api/open-shifts/{sid}/claim", headers=covering_headers,
+        ), 200)
+        assert waitlisted["status"] == "waitlisted"
         # duplicate claim should fail
         r4 = session.post(f"{BASE_URL}/api/open-shifts/{sid}/claim", headers=guard_headers)
         assert r4.status_code == 400 or r4.json().get("status") == "waitlisted"
-        # cancel claim
+        # Cancelling the claimed slot atomically promotes the waiting guard.
         r5 = session.post(f"{BASE_URL}/api/open-shifts/{sid}/cancel-claim", headers=guard_headers)
         assert r5.status_code == 200
         assert r5.json()["status"] == "cancelled"
+        promoted = expect(session.get(f"{BASE_URL}/api/my-claims", headers=covering_headers), 200)
+        assert any(claim["claimed_from_open"] == sid for claim in promoted["claims"])
+        expect(session.post(f"{BASE_URL}/api/open-shifts/{sid}/cancel-claim", headers=covering_headers), 200)
+        assert session.post(f"{BASE_URL}/api/open-shifts/{sid}/cancel-claim", headers=covering_headers).status_code == 404
 
 
 # ---- shift swaps ----
@@ -418,6 +432,39 @@ class TestShiftSwaps:
             open_shifts = expect(manager_session.get(f"{BASE_URL}/api/admin/open-shifts"), 200)
             assert "shifts" in open_shifts
             assert open_shifts["shifts"][0]["spots_available"] == 1
+            payroll_periods = expect(manager_session.get(f"{BASE_URL}/api/admin/payroll"), 200)["periods"]
+            payroll_record = payroll_periods[0]
+            recalculated = expect(manager_session.put(
+                f"{BASE_URL}/api/admin/payroll/{payroll_record['id']}",
+                json={
+                    "hours_regular": 40,
+                    "hours_overtime": 2,
+                    "pay_rate": 30,
+                    "deductions": [{"label": "Authorized deduction", "amount": 100}],
+                    "status": "released",
+                    "comments": [{"text": "Verified by the E2E manager."}],
+                },
+            ), 200)
+            assert recalculated["gross"] == 1290
+            assert recalculated["total_deductions"] == 100
+            assert recalculated["net"] == 1190
+            assert recalculated["comments"][0]["author"] == "E2E Manager"
+            tampered = manager_session.put(
+                f"{BASE_URL}/api/admin/payroll/{payroll_record['id']}",
+                json={"comments": [{"text": "Altered historical comment."}]},
+            )
+            assert tampered.status_code == 409
+            duplicate_payroll = manager_session.post(
+                f"{BASE_URL}/api/admin/payroll",
+                json={
+                    "user_id": payroll_record["user_id"],
+                    "period_start": payroll_record["period_start"],
+                    "period_end": payroll_record["period_end"],
+                    "hours_regular": 1,
+                    "pay_rate": 30,
+                },
+            )
+            assert duplicate_payroll.status_code == 409
             awaiting = expect(manager_session.get(f"{BASE_URL}/api/admin/shift-swaps?status=accepted"), 200)
             assert any(item["id"] == created["id"] for item in awaiting["swaps"])
             expect(manager_session.post(
@@ -555,6 +602,44 @@ class TestWallet:
         assert d["qr_expires_in_seconds"] == 300
 
 
+# ---- community and private attachments ----
+class TestCommunity:
+    def test_attachment_ownership_edit_cleanup_and_delete(self, session, guard_headers):
+        with httpx.Client(timeout=20.0) as upload_client:
+            uploaded = expect(upload_client.post(
+                f"{BASE_URL}/api/uploads",
+                headers={"Authorization": guard_headers["Authorization"]},
+                files={"file": ("evidence.png", b"\x89PNG\r\n\x1a\nE2E", "image/png")},
+            ), 201)
+        post = expect(session.post(
+            f"{BASE_URL}/api/community/posts",
+            headers=guard_headers,
+            json={"body": "E2E community update", "attachments": [uploaded]},
+        ), 201)
+        assert post["attachments"][0]["url"] == uploaded["url"]
+
+        covering_guard = expect(session.post(
+            f"{BASE_URL}/api/auth/login",
+            json={"email": SECOND_GUARD_EMAIL, "password": SECOND_GUARD_PASSWORD},
+        ), 200)
+        stolen = session.post(
+            f"{BASE_URL}/api/community/posts",
+            headers={"Authorization": f"Bearer {covering_guard['access_token']}"},
+            json={"body": "Must not reuse another guard's private upload", "attachments": [uploaded]},
+        )
+        assert stolen.status_code == 403
+
+        edited = expect(session.put(
+            f"{BASE_URL}/api/community/posts/{post['id']}",
+            headers=guard_headers,
+            json={"body": "E2E community update without attachment", "attachments": []},
+        ), 200)
+        assert edited["attachments"] == []
+        removed_file = session.get(f"{BASE_URL}{uploaded['url']}", headers=guard_headers)
+        assert removed_file.status_code == 404
+        expect(session.delete(f"{BASE_URL}/api/community/posts/{post['id']}", headers=guard_headers), 200)
+
+
 # ---- announcements ----
 class TestAnnouncements:
     def test_list_and_ack(self, session, guard_headers):
@@ -613,7 +698,7 @@ class TestPayroll:
         assert isinstance(d["periods"], list) and len(d["periods"]) > 0
         assert d["current"] is not None
         stages = {p["status"] for p in d["periods"]}
-        assert stages.issubset({"submitted", "under_review", "released", "paid"})
+        assert stages.issubset({"submitted", "under_review", "approved", "released", "paid"})
         assert isinstance(d["total_hours"], (int, float))
         assert isinstance(d["total_gross"], (int, float))
 

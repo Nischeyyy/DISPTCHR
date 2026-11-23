@@ -15,7 +15,7 @@ No fake business records, demo accounts, default passwords, or development authe
 | --- | --- | --- |
 | Workforce backend syntax | Green | all production Python modules compile |
 | Backend security scan | Green | Bandit reports no findings; the production Python dependency audit reports 0 known vulnerabilities |
-| Backend automated tests | Green | 48 core tests passed; 24 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
+| Backend automated tests | Green | 49 core tests passed; 25 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
 | Manager Portal | Green | 12 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Disptchr Panel database | Green | schema v6 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
 | Disptchr Panel | Green | TypeScript passed; 5 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities |
@@ -46,8 +46,10 @@ No fake business records, demo accounts, default passwords, or development authe
 - Manager Portal provides permission-controlled guards, sites, shifts, open shifts, timeclock, live locations, incidents, SOS, announcements, compliance, shift swaps, and payroll workflows.
 - Manager screens expose failed reads with an accessible error and retry action instead of remaining in an indefinite loading state. Scheduling, payroll, announcements, incidents, swaps, timeclock, and compliance use permission-scoped API contracts, so a manager does not need unrelated guard-record or site-administration access to use an assigned tool.
 - Manager form fields now match the authoritative API contract: sites persist coordinates, geofence radius, supervisor contacts and instructions; open shifts persist capacity and urgency; announcements persist severity and a fixed global or site-specific audience. Site-targeted announcements are enforced for list, acknowledgement, email, push, and in-app delivery.
-- Open-shift slot reservation is atomic and protected by a database uniqueness invariant, overlapping claims are rejected, shift edits re-run interval and overlap validation, and timeclock edits recalculate worked hours and synchronize the associated shift.
+- Open-shift slot reservation and waitlist promotion are atomic and protected by a database uniqueness invariant. Overlapping claims are rejected; duplicate cancellations fail; management cancellation/deletion releases the slot, closes active swaps, promotes the next eligible guard, and records notifications. Shift edits re-run interval and overlap validation, and timeclock edits recalculate worked hours and synchronize the associated shift.
+- Payroll hours, overtime, rates, taxes, deductions, gross and net values are recalculated by the API rather than trusted from the browser. Payroll periods have duplicate protection, imported batches are validated and rolled back on conflicts, approval comments are append-only and manager-attributed, and release/paid transitions notify the guard exactly once per state change.
 - Durable email, SMS, and Expo notification jobs use leases, retry/backoff, retention, dead-letter state, and a separately monitored worker.
+- Private uploads are owner-validated before being attached to onboarding or community records. Cross-account reuse is denied, removed post attachments are deleted only after all references are gone, deleted payroll records remove their generated stubs, and failed metadata writes clean up both local and S3 objects instead of leaving orphaned files.
 
 ### Directors' Disptchr Panel
 

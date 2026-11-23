@@ -228,6 +228,23 @@ def validate_shift_interval(start: str, end: str) -> None:
         raise HTTPException(422, "Shift end must be after shift start")
 
 
+def validate_payroll_period(period_start: str, period_end: str, pay_date: Optional[str] = None) -> None:
+    try:
+        start_on = date.fromisoformat(period_start[:10])
+        end_on = date.fromisoformat(period_end[:10])
+        if pay_date:
+            date.fromisoformat(pay_date[:10])
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Payroll dates must use ISO 8601 format")
+    if end_on < start_on:
+        raise HTTPException(422, "Payroll period end must be on or after its start")
+
+
+def payroll_period_key(user_id: str, period_start: str, period_end: str) -> str:
+    source = f"{user_id}|{period_start[:10]}|{period_end[:10]}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
 def hash_password(pw: str) -> str:
     normalized = hashlib.sha256(pw.encode("utf-8")).hexdigest().encode("ascii")
     return "bcrypt-sha256$" + bcrypt.hashpw(normalized, bcrypt.gensalt()).decode()
@@ -570,14 +587,14 @@ class SwapActionIn(BaseModel):
 
 
 class PayrollCalculateIn(BaseModel):
-    user_id: str
-    period_start: str
-    period_end: str
-    pay_date: str
-    hourly_rate: float = Field(gt=0)
-    overtime_threshold: float = 40.0
-    overtime_multiplier: float = 1.5
-    tax_rate: float = 0.28
+    user_id: str = Field(min_length=1, max_length=100)
+    period_start: str = Field(min_length=10, max_length=50)
+    period_end: str = Field(min_length=10, max_length=50)
+    pay_date: str = Field(min_length=10, max_length=50)
+    hourly_rate: float = Field(gt=0, le=1000)
+    overtime_threshold: float = Field(default=40.0, ge=0, le=1000)
+    overtime_multiplier: float = Field(default=1.5, ge=1, le=10)
+    tax_rate: float = Field(default=0.28, ge=0, le=1)
 
 
 class WalletDocIn(BaseModel):
@@ -591,7 +608,7 @@ class CommunityPostIn(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
     type: str = Field(default="post", max_length=20)  # post | announcement | event | recognition
     audience: str = Field(default="All Staff", max_length=50)
-    attachments: List[dict] = Field(default_factory=list)
+    attachments: List[dict] = Field(default_factory=list, max_length=10)
 
 
 class CommunityCommentIn(BaseModel):
@@ -600,7 +617,7 @@ class CommunityCommentIn(BaseModel):
 
 class CommunityEditIn(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
-    attachments: List[dict] = Field(default_factory=list)
+    attachments: List[dict] = Field(default_factory=list, max_length=10)
 
 
 class ChangePasswordIn(BaseModel):
@@ -775,6 +792,7 @@ async def ensure_indexes():
     await db.incidents.create_index("id", unique=True)
     await db.timeclock.create_index("id", unique=True)
     await db.payroll.create_index("id", unique=True)
+    await db.payroll.create_index("period_key", unique=True, sparse=True)
     await db.push_tokens.create_index([("user_id", 1), ("device_token", 1)], unique=True)
     await db.refresh_tokens.create_index("token_digest", unique=True)
     await db.refresh_tokens.create_index("expires_at", expireAfterSeconds=0)
@@ -1190,18 +1208,23 @@ async def upload_file(request: Request, file: UploadFile = File(...), user=Depen
         raise HTTPException(413, "File too large (max 10 MB)")
     ext = mimetypes.guess_extension(file.content_type) or ""
     stored_name = f"{uuid.uuid4()}{ext}"
-    await storage.put(f"attachments/{stored_name}", contents, file.content_type)
+    storage_key = f"attachments/{stored_name}"
+    await storage.put(storage_key, contents, file.content_type)
     canonical_url = f"/api/files/attachments/{stored_name}"
-    await db.stored_files.insert_one({
-        "id": str(uuid.uuid4()),
-        "category": "attachments",
-        "stored_name": stored_name,
-        "owner_id": user["id"],
-        "original_name": file.filename,
-        "content_type": file.content_type,
-        "byte_size": len(contents),
-        "created_at": iso(now_utc()),
-    })
+    try:
+        await db.stored_files.insert_one({
+            "id": str(uuid.uuid4()),
+            "category": "attachments",
+            "stored_name": stored_name,
+            "owner_id": user["id"],
+            "original_name": file.filename,
+            "content_type": file.content_type,
+            "byte_size": len(contents),
+            "created_at": iso(now_utc()),
+        })
+    except Exception:
+        await storage.delete(storage_key)
+        raise
     return {
         "url": canonical_url,
         "name": file.filename,
@@ -1229,6 +1252,69 @@ async def _validated_file_key(category: str, filename: str) -> str:
     if not await storage.exists(key):
         raise HTTPException(404, "File not found")
     return key
+
+
+def _stored_file_reference(url: str) -> Optional[tuple[str, str]]:
+    match = re.fullmatch(r"/(?:api/files|uploads)/(attachments|paystubs)/([A-Za-z0-9._-]+)", url or "")
+    return (match.group(1), match.group(2)) if match else None
+
+
+def _attachment_filename(url: str) -> Optional[str]:
+    reference = _stored_file_reference(url)
+    return reference[1] if reference and reference[0] == "attachments" else None
+
+
+async def _delete_stored_file(url: str) -> None:
+    reference = _stored_file_reference(url)
+    if not reference:
+        return
+    category, filename = reference
+    await storage.delete(f"{category}/{filename}")
+    await db.stored_files.delete_one({"category": category, "stored_name": filename})
+
+
+async def _validate_post_attachments(
+    attachments: List[dict], user_id: str, existing_urls: Optional[set[str]] = None,
+) -> List[dict]:
+    existing_urls = existing_urls or set()
+    normalized = []
+    seen = set()
+    for item in attachments:
+        url = str(item.get("url") or "")
+        filename = _attachment_filename(url)
+        if not filename:
+            raise HTTPException(422, "Community attachments must be uploaded through Disptchr")
+        canonical_url = f"/api/files/attachments/{filename}"
+        if canonical_url in seen:
+            continue
+        stored = await db.stored_files.find_one({
+            "category": "attachments", "stored_name": filename,
+        }, {"_id": 0})
+        if not stored or (stored.get("owner_id") != user_id and canonical_url not in existing_urls):
+            raise HTTPException(403, "Attachment is unavailable or belongs to another account")
+        seen.add(canonical_url)
+        normalized.append({
+            "url": canonical_url,
+            "name": str(stored.get("original_name") or item.get("name") or "Attachment")[:255],
+            "content_type": stored.get("content_type"),
+            "size": stored.get("byte_size"),
+            "kind": "image" if str(stored.get("content_type") or "").startswith("image/") else "pdf",
+        })
+    return normalized
+
+
+async def _delete_attachment_if_unreferenced(url: str) -> None:
+    filename = _attachment_filename(url)
+    if not filename:
+        return
+    canonical = f"/api/files/attachments/{filename}"
+    legacy = f"/uploads/attachments/{filename}"
+    if await db.community_posts.find_one({"attachments.url": {"$in": [canonical, legacy]}}, {"_id": 1}):
+        return
+    if await db.wallet_documents.find_one({"attachment_url": {"$in": [canonical, legacy]}}, {"_id": 1}):
+        return
+    await storage.delete(f"attachments/{filename}")
+    await db.stored_files.delete_one({"category": "attachments", "stored_name": filename})
 
 
 async def _can_access_file(user: dict, category: str, filename: str) -> bool:
@@ -1571,30 +1657,106 @@ async def claim_shift(shift_id: str, user=Depends(get_current_user)):
     return {"status": "claimed", "shift_id": new_shift["id"]}
 
 
-@api.post("/open-shifts/{shift_id}/cancel-claim")
-async def cancel_claim(shift_id: str, user=Depends(get_current_user)):
-    await db.open_shifts.update_one({"id": shift_id}, {"$pull": {"claimed_by": user["id"], "waitlist": user["id"]}})
-    await db.shifts.delete_one({"user_id": user["id"], "claimed_from_open": shift_id})
-    # Auto-promote first person on waitlist
-    s = await db.open_shifts.find_one({"id": shift_id})
-    if s:
-        waitlist = s.get("waitlist") or []
-        claimed = s.get("claimed_by") or []
-        if waitlist and len(claimed) < s.get("spots_available", 1):
-            next_uid = waitlist[0]
+async def promote_open_shift_waitlist(shift_id: str) -> Optional[str]:
+    """Atomically promote the next eligible guard when a claimed slot opens."""
+    for _ in range(500):
+        open_shift = await db.open_shifts.find_one({"id": shift_id})
+        if not open_shift:
+            return None
+        waitlist = open_shift.get("waitlist") or []
+        claimed = open_shift.get("claimed_by") or []
+        if not waitlist or len(claimed) >= open_shift.get("spots_available", 1):
+            return None
+        next_uid = waitlist[0]
+        guard = await db.users.find_one(
+            {"id": next_uid, "role": "employee", "access_status": {"$ne": "disabled"}},
+            {"_id": 1},
+        )
+        overlap = await db.shifts.find_one({
+            "user_id": next_uid,
+            "status": {"$ne": "cancelled"},
+            "start": {"$lt": open_shift["end"]},
+            "end": {"$gt": open_shift["start"]},
+        })
+        if not guard or overlap:
+            await db.open_shifts.update_one(
+                {"id": shift_id}, {"$pull": {"waitlist": next_uid}}
+            )
+            continue
+        reserved = await db.open_shifts.find_one_and_update(
+            {
+                "id": shift_id,
+                "waitlist": next_uid,
+                "claimed_by": {"$ne": next_uid},
+                "$expr": {
+                    "$lt": [
+                        {"$size": {"$ifNull": ["$claimed_by", []]}},
+                        "$spots_available",
+                    ]
+                },
+            },
+            {"$pull": {"waitlist": next_uid}, "$addToSet": {"claimed_by": next_uid}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not reserved:
+            continue
+        promoted = {
+            "id": str(uuid.uuid4()), "user_id": next_uid, "site_id": reserved["site_id"],
+            "start": reserved["start"], "end": reserved["end"], "role": reserved["role"],
+            "pay_rate": reserved["pay_rate"], "status": "scheduled",
+            "claimed_from_open": shift_id, "instructions_acknowledged": False,
+        }
+        try:
+            await db.shifts.insert_one(promoted)
+        except DuplicateKeyError:
+            return next_uid
+        except Exception:
             await db.open_shifts.update_one(
                 {"id": shift_id},
-                {"$pull": {"waitlist": next_uid}, "$addToSet": {"claimed_by": next_uid}},
+                {"$pull": {"claimed_by": next_uid}, "$addToSet": {"waitlist": next_uid}},
             )
-            promoted = {
-                "id": str(uuid.uuid4()), "user_id": next_uid, "site_id": s["site_id"],
-                "start": s["start"], "end": s["end"], "role": s["role"],
-                "pay_rate": s["pay_rate"], "status": "scheduled",
-                "claimed_from_open": shift_id, "instructions_acknowledged": False,
-            }
-            await db.shifts.insert_one(promoted)
-            await send_push([next_uid], {"title": "Spot Available!", "message": f"You've been promoted from the waitlist for a {s['role']} shift on {s['start'][:10]}"})
-            await notif.save_inapp(db, [next_uid], "Waitlist Promoted 🎉", f"You got a spot for {s['role']} on {s['start'][:10]}.", category="shift")
+            raise
+        await send_push([next_uid], {
+            "title": "Spot Available!",
+            "message": f"You've been promoted from the waitlist for a {reserved['role']} shift on {reserved['start'][:10]}",
+        })
+        await notif.save_inapp(
+            db, [next_uid], "Waitlist Promoted 🎉",
+            f"You got a spot for {reserved['role']} on {reserved['start'][:10]}.", category="shift",
+        )
+        return next_uid
+    logger.error("Open-shift waitlist promotion did not converge for %s", shift_id)
+    return None
+
+
+async def release_open_shift_claim(shift: dict) -> None:
+    open_shift_id = shift.get("claimed_from_open")
+    user_id = shift.get("user_id")
+    if not open_shift_id or not user_id:
+        return
+    released = await db.open_shifts.update_one(
+        {"id": open_shift_id, "claimed_by": user_id},
+        {"$pull": {"claimed_by": user_id}},
+    )
+    if released.modified_count:
+        await promote_open_shift_waitlist(open_shift_id)
+
+
+@api.post("/open-shifts/{shift_id}/cancel-claim")
+async def cancel_claim(shift_id: str, user=Depends(get_current_user)):
+    before = await db.open_shifts.find_one_and_update(
+        {
+            "id": shift_id,
+            "$or": [{"claimed_by": user["id"]}, {"waitlist": user["id"]}],
+        },
+        {"$pull": {"claimed_by": user["id"], "waitlist": user["id"]}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if not before:
+        raise HTTPException(404, "Claim or waitlist entry not found")
+    await db.shifts.delete_one({"user_id": user["id"], "claimed_from_open": shift_id})
+    if user["id"] in (before.get("claimed_by") or []):
+        await promote_open_shift_waitlist(shift_id)
     return {"status": "cancelled"}
 
 
@@ -1863,7 +2025,9 @@ async def list_incidents(user=Depends(get_current_user)):
 # ============================================================
 @api.get("/payroll")
 async def payroll(user=Depends(get_current_user)):
-    periods = await db.payroll.find({"user_id": user["id"]}, {"_id": 0}).sort("period_end", -1).to_list(20)
+    periods = await db.payroll.find(
+        {"user_id": user["id"], "status": {"$ne": "cancelled"}}, {"_id": 0}
+    ).sort("period_end", -1).to_list(20)
     current = periods[0] if periods else None
     total_hours = sum(p.get("hours_regular", 0) + p.get("hours_overtime", 0) for p in periods)
     total_gross = sum(p.get("gross", 0) for p in periods)
@@ -1911,6 +2075,10 @@ async def onboarding_status(user=Depends(get_current_user)):
 
 @api.post("/onboarding/documents", status_code=201)
 async def onboarding_documents(body: OnboardingDocIn, user=Depends(get_current_user)):
+    attachment_url = body.attachment_url
+    if attachment_url:
+        attachment = await _validate_post_attachments([{"url": attachment_url}], user["id"])
+        attachment_url = attachment[0]["url"]
     doc = {
         "id": str(uuid.uuid4()),
         "user_id": user["id"],
@@ -1919,7 +2087,7 @@ async def onboarding_documents(body: OnboardingDocIn, user=Depends(get_current_u
         "number": body.number,
         "expiry": body.expiry,
         "status": _compliance_status(body.expiry),
-        "attachment_url": body.attachment_url,
+        "attachment_url": attachment_url,
         "created_at": iso(now_utc()),
     }
     await db.wallet_documents.insert_one(doc)
@@ -2307,15 +2475,15 @@ class AdminCreateShiftIn(BaseModel):
 
 
 class AdminUpdateShiftIn(BaseModel):
-    user_id: Optional[str] = None
-    site_id: Optional[str] = None
-    start: Optional[str] = None
-    end: Optional[str] = None
-    role: Optional[str] = None
-    pay_rate: Optional[float] = None
-    status: Optional[str] = None
-    hours_worked: Optional[float] = None
-    notes: Optional[str] = None
+    user_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    site_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    start: Optional[str] = Field(default=None, min_length=10, max_length=50)
+    end: Optional[str] = Field(default=None, min_length=10, max_length=50)
+    role: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    pay_rate: Optional[float] = Field(default=None, ge=0, le=1000)
+    status: Optional[Literal["scheduled", "active", "completed", "cancelled"]] = None
+    hours_worked: Optional[float] = Field(default=None, ge=0, le=24)
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 
 class AdminCreateOpenShiftIn(BaseModel):
@@ -2342,40 +2510,48 @@ class AdminUpdateIncidentIn(BaseModel):
 
 
 class DeductionItem(BaseModel):
-    label: str
-    amount: float
+    label: str = Field(min_length=1, max_length=200)
+    amount: float = Field(ge=0, le=1_000_000)
+
+
+class PayrollCommentIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    at: Optional[str] = Field(default=None, max_length=50)
+    author: Optional[str] = Field(default=None, max_length=120)
 
 
 class AdminCreatePayrollIn(BaseModel):
-    user_id: str
-    period_start: str
-    period_end: str
-    pay_date: Optional[str] = None          # defaults to period_end if omitted
-    hours_regular: Optional[float] = None   # kept for back-compat
-    hours_worked: Optional[float] = None    # frontend-friendly alias
-    hours_overtime: float = 0.0
-    pay_rate: Optional[float] = None        # kept for back-compat
-    hourly_rate: Optional[float] = None     # frontend-friendly alias
-    status: str = "submitted"
-    notes: Optional[str] = None
-    deductions: List[DeductionItem] = []
-    paid_via: Optional[str] = None          # cash | cheque | direct_deposit | interac
+    user_id: str = Field(min_length=1, max_length=100)
+    period_start: str = Field(min_length=10, max_length=50)
+    period_end: str = Field(min_length=10, max_length=50)
+    pay_date: Optional[str] = Field(default=None, min_length=10, max_length=50)
+    hours_regular: Optional[float] = Field(default=None, ge=0, le=1000)
+    hours_worked: Optional[float] = Field(default=None, ge=0, le=1000)
+    hours_overtime: float = Field(default=0.0, ge=0, le=1000)
+    pay_rate: Optional[float] = Field(default=None, gt=0, le=1000)
+    hourly_rate: Optional[float] = Field(default=None, gt=0, le=1000)
+    status: Literal["submitted", "under_review", "approved", "released", "paid", "cancelled"] = "submitted"
+    notes: Optional[str] = Field(default=None, max_length=5000)
+    deductions: List[DeductionItem] = Field(default_factory=list, max_length=100)
+    paid_via: Optional[Literal["cash", "cheque", "direct_deposit", "interac"]] = None
+    comments: List[PayrollCommentIn] = Field(default_factory=list, max_length=500)
 
 
 class AdminUpdatePayrollIn(BaseModel):
-    status: Optional[str] = None
-    user_id: Optional[str] = None
-    hours_regular: Optional[float] = None
-    hours_worked: Optional[float] = None
-    hours_overtime: Optional[float] = None
-    pay_rate: Optional[float] = None
-    hourly_rate: Optional[float] = None
-    pay_date: Optional[str] = None
-    gross: Optional[float] = None
-    net: Optional[float] = None
-    notes: Optional[str] = None
-    deductions: Optional[List[DeductionItem]] = None
-    paid_via: Optional[str] = None
+    status: Optional[Literal["submitted", "under_review", "approved", "released", "paid", "cancelled"]] = None
+    user_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    period_start: Optional[str] = Field(default=None, min_length=10, max_length=50)
+    period_end: Optional[str] = Field(default=None, min_length=10, max_length=50)
+    hours_regular: Optional[float] = Field(default=None, ge=0, le=1000)
+    hours_worked: Optional[float] = Field(default=None, ge=0, le=1000)
+    hours_overtime: Optional[float] = Field(default=None, ge=0, le=1000)
+    pay_rate: Optional[float] = Field(default=None, gt=0, le=1000)
+    hourly_rate: Optional[float] = Field(default=None, gt=0, le=1000)
+    pay_date: Optional[str] = Field(default=None, min_length=10, max_length=50)
+    notes: Optional[str] = Field(default=None, max_length=5000)
+    deductions: Optional[List[DeductionItem]] = Field(default=None, max_length=100)
+    paid_via: Optional[Literal["cash", "cheque", "direct_deposit", "interac"]] = None
+    comments: Optional[List[PayrollCommentIn]] = Field(default=None, max_length=500)
 
 
 class AdminUpdateTimeclockIn(BaseModel):
@@ -2621,6 +2797,8 @@ async def admin_update_shift(shift_id: str, body: AdminUpdateShiftIn, admin=Depe
     if not current:
         raise HTTPException(404, "Shift not found")
     merged = {**current, **update}
+    if current.get("status") == "cancelled" and merged.get("status") != "cancelled":
+        raise HTTPException(409, "A cancelled shift cannot be reactivated; create a new shift")
     validate_shift_interval(merged["start"], merged["end"])
     if "user_id" in update and not await db.users.find_one({"id": merged["user_id"], "role": "employee"}, {"_id": 1}):
         raise HTTPException(404, "Guard not found")
@@ -2637,14 +2815,48 @@ async def admin_update_shift(shift_id: str, body: AdminUpdateShiftIn, admin=Depe
         if overlap:
             raise HTTPException(409, f"Scheduling conflict: guard already has a shift from {overlap['start'][:16]} to {overlap['end'][:16]}.")
     await db.shifts.update_one({"id": shift_id}, {"$set": update})
+    if current.get("status") != "cancelled" and merged.get("status") == "cancelled":
+        await db.shift_swaps.update_many(
+            {"shift_id": shift_id, "status": {"$in": ["open", "accepted", "processing"]}},
+            {"$set": {
+                "status": "cancelled", "resolved_at": iso(now_utc()),
+                "manager_note": "The assigned shift was cancelled by management.",
+            }, "$unset": {"active_shift_id": "", "decision_started_at": "", "decision_started_by": ""}},
+        )
+        await release_open_shift_claim(current)
+        await send_push([current["user_id"]], {
+            "title": "Shift Cancelled",
+            "message": f"Your shift on {current['start'][:10]} was cancelled by management.",
+        })
+        await notif.save_inapp(
+            db, [current["user_id"]], "Shift Cancelled",
+            f"Your shift on {current['start'][:10]} was cancelled by management.", category="shift",
+        )
     return await db.shifts.find_one({"id": shift_id}, {"_id": 0})
 
 
 @api.delete("/admin/shifts/{shift_id}", status_code=204)
 async def admin_delete_shift(shift_id: str, admin=Depends(require_admin)):
-    r = await db.shifts.delete_one({"id": shift_id})
-    if r.deleted_count == 0:
+    shift = await db.shifts.find_one({"id": shift_id})
+    if not shift:
         raise HTTPException(404, "Shift not found")
+    await db.shifts.delete_one({"id": shift_id})
+    await db.shift_swaps.update_many(
+        {"shift_id": shift_id, "status": {"$in": ["open", "accepted", "processing"]}},
+        {"$set": {
+            "status": "cancelled", "resolved_at": iso(now_utc()),
+            "manager_note": "The assigned shift was deleted by management.",
+        }, "$unset": {"active_shift_id": "", "decision_started_at": "", "decision_started_by": ""}},
+    )
+    await release_open_shift_claim(shift)
+    await send_push([shift["user_id"]], {
+        "title": "Shift Removed",
+        "message": f"Your shift on {shift['start'][:10]} was removed by management.",
+    })
+    await notif.save_inapp(
+        db, [shift["user_id"]], "Shift Removed",
+        f"Your shift on {shift['start'][:10]} was removed by management.", category="shift",
+    )
 
 
 # ============================================================
@@ -2842,13 +3054,28 @@ async def admin_payroll_guards(admin=Depends(require_admin)):
 
 @api.post("/admin/payroll", status_code=201)
 async def admin_create_payroll(body: AdminCreatePayrollIn, admin=Depends(require_admin)):
+    if not await db.users.find_one({"id": body.user_id, "role": "employee"}, {"_id": 1}):
+        raise HTTPException(404, "Guard not found")
+    validate_payroll_period(body.period_start, body.period_end, body.pay_date)
     hours_reg = body.hours_regular if body.hours_regular is not None else (body.hours_worked or 0.0)
-    rate = body.pay_rate if body.pay_rate is not None else (body.hourly_rate or 0.0)
+    rate = body.pay_rate if body.pay_rate is not None else body.hourly_rate
+    if rate is None:
+        raise HTTPException(422, "Pay rate is required")
+    period_key = payroll_period_key(body.user_id, body.period_start, body.period_end)
+    existing = await db.payroll.find_one({
+        "user_id": body.user_id,
+        "period_start": {"$regex": f"^{re.escape(body.period_start[:10])}"},
+        "period_end": {"$regex": f"^{re.escape(body.period_end[:10])}"},
+    }, {"_id": 1})
+    if existing:
+        raise HTTPException(409, "A payroll record already exists for this guard and period")
     gross = round(hours_reg * rate + body.hours_overtime * rate * 1.5, 2)
     total_deductions = round(sum(d.amount for d in body.deductions), 2)
     net = round(gross - total_deductions, 2)
+    if net < 0:
+        raise HTTPException(422, "Payroll deductions cannot exceed gross pay")
     record = {
-        "id": str(uuid.uuid4()), "user_id": body.user_id,
+        "id": str(uuid.uuid4()), "user_id": body.user_id, "period_key": period_key,
         "period_start": body.period_start, "period_end": body.period_end,
         "pay_date": body.pay_date or body.period_end,
         "hours_regular": hours_reg, "hours_overtime": body.hours_overtime,
@@ -2858,10 +3085,21 @@ async def admin_create_payroll(body: AdminCreatePayrollIn, admin=Depends(require
         "net": net,
         "status": body.status, "notes": body.notes or "",
         "paid_via": body.paid_via,
+        "comments": [
+            {
+                "text": comment.text.strip(), "at": iso(now_utc()),
+                "author": admin.get("full_name") or "Manager", "author_id": admin["id"],
+            }
+            for comment in body.comments
+        ],
         "pay_stub_url": None,
         "created_by": admin["id"], "created_at": iso(now_utc()),
     }
-    await db.payroll.insert_one(record); record.pop("_id", None)
+    try:
+        await db.payroll.insert_one(record)
+    except DuplicateKeyError:
+        raise HTTPException(409, "A payroll record already exists for this guard and period")
+    record.pop("_id", None)
     return record
 
 
@@ -2999,27 +3237,51 @@ async def parse_timesheet_upload(
 
 
 class BulkPayrollEntryIn(BaseModel):
-    lic_number:   str
-    guard_name:   str
-    user_id:      Optional[str] = None
-    period_start: str
-    period_end:   str
-    pay_date:     Optional[str] = None
-    hours_regular: float
-    pay_rate:     float
-    notes:        Optional[str] = ""
-    shift_count:  Optional[int] = None
-    shift_dates:  Optional[List[str]] = None
+    lic_number: str = Field(min_length=1, max_length=100)
+    guard_name: str = Field(min_length=1, max_length=200)
+    user_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    period_start: str = Field(min_length=10, max_length=50)
+    period_end: str = Field(min_length=10, max_length=50)
+    pay_date: Optional[str] = Field(default=None, min_length=10, max_length=50)
+    hours_regular: float = Field(ge=0, le=1000)
+    pay_rate: float = Field(gt=0, le=1000)
+    notes: Optional[str] = Field(default="", max_length=5000)
+    shift_count: Optional[int] = Field(default=None, ge=0, le=10_000)
+    shift_dates: Optional[List[str]] = Field(default=None, max_length=1000)
 
 
 @api.post("/admin/payroll/bulk-create", status_code=201)
 async def bulk_create_payroll(entries: List[BulkPayrollEntryIn], admin=Depends(require_admin)):
+    if not entries:
+        raise HTTPException(422, "At least one payroll entry is required")
+    if len(entries) > 500:
+        raise HTTPException(413, "A maximum of 500 payroll entries can be imported at once")
+    linked_ids = {entry.user_id for entry in entries if entry.user_id}
+    if linked_ids:
+        valid_ids = set(await db.users.distinct("id", {"id": {"$in": list(linked_ids)}, "role": "employee"}))
+        missing_ids = linked_ids - valid_ids
+        if missing_ids:
+            raise HTTPException(404, "One or more linked guards no longer exist")
     records = []
+    batch_keys: set[str] = set()
+    legacy_queries = []
     for e in entries:
+        validate_payroll_period(e.period_start, e.period_end, e.pay_date)
+        payroll_user_id = e.user_id or f"ext:{e.lic_number}"
+        period_key = payroll_period_key(payroll_user_id, e.period_start, e.period_end)
+        if period_key in batch_keys:
+            raise HTTPException(409, "The import contains duplicate guard payroll periods")
+        batch_keys.add(period_key)
+        legacy_queries.append({
+            "user_id": payroll_user_id,
+            "period_start": {"$regex": f"^{re.escape(e.period_start[:10])}"},
+            "period_end": {"$regex": f"^{re.escape(e.period_end[:10])}"},
+        })
         gross = round(e.hours_regular * e.pay_rate, 2)
         records.append({
             "id":               str(uuid.uuid4()),
-            "user_id":          e.user_id or f"ext:{e.lic_number}",
+            "user_id":          payroll_user_id,
+            "period_key":       period_key,
             "lic_number":       e.lic_number,
             "guard_name_import": e.guard_name,
             "period_start":     e.period_start,
@@ -3042,50 +3304,117 @@ async def bulk_create_payroll(entries: List[BulkPayrollEntryIn], admin=Depends(r
             "created_by":       admin["id"],
             "created_at":       iso(now_utc()),
         })
-    if records:
+    if await db.payroll.find_one({"$or": legacy_queries}, {"_id": 1}):
+        raise HTTPException(409, "A payroll record already exists for one or more imported periods")
+    try:
         await db.payroll.insert_many(records)
-        for r in records:
-            r.pop("_id", None)
+    except DuplicateKeyError:
+        await db.payroll.delete_many({"id": {"$in": [record["id"] for record in records]}})
+        raise HTTPException(409, "A payroll record already exists for one or more imported periods")
+    for record in records:
+        record.pop("_id", None)
     return {"created": len(records)}
 
 
 @api.put("/admin/payroll/{payroll_id}")
 async def admin_update_payroll(payroll_id: str, body: AdminUpdatePayrollIn, admin=Depends(require_admin)):
+    current = await db.payroll.find_one({"id": payroll_id})
+    if not current:
+        raise HTTPException(404, "Payroll record not found")
     raw = body.model_dump()
-    # Normalise aliased fields
     if raw.get("hours_worked") is not None and raw.get("hours_regular") is None:
         raw["hours_regular"] = raw["hours_worked"]
     if raw.get("hourly_rate") is not None and raw.get("pay_rate") is None:
         raw["pay_rate"] = raw["hourly_rate"]
     raw.pop("hours_worked", None); raw.pop("hourly_rate", None)
-    # Serialise deduction items
     if raw.get("deductions") is not None:
         raw["deductions"] = [d if isinstance(d, dict) else d.model_dump() for d in raw["deductions"]]
-        raw["total_deductions"] = round(sum(d["amount"] for d in raw["deductions"]), 2)
+    if raw.get("comments") is not None:
+        incoming = [comment if isinstance(comment, dict) else comment.model_dump() for comment in raw["comments"]]
+        existing_comments = current.get("comments") or []
+        if len(incoming) < len(existing_comments):
+            raise HTTPException(409, "Payroll approval comments are append-only")
+        for index, existing in enumerate(existing_comments):
+            candidate = incoming[index]
+            if any(candidate.get(key) != existing.get(key) for key in ("text", "at", "author")):
+                raise HTTPException(409, "Payroll approval comments are append-only")
+        raw["comments"] = existing_comments + [
+            {
+                "text": comment["text"].strip(),
+                "at": iso(now_utc()),
+                "author": admin.get("full_name") or "Manager",
+                "author_id": admin["id"],
+            }
+            for comment in incoming[len(existing_comments):]
+        ]
     update = {k: v for k, v in raw.items() if v is not None}
     if not update:
         raise HTTPException(400, "No fields to update")
-    r = await db.payroll.update_one({"id": payroll_id}, {"$set": update})
-    if r.matched_count == 0:
-        raise HTTPException(404, "Payroll record not found")
+    merged = {**current, **update}
+    validate_payroll_period(merged["period_start"], merged["period_end"], merged.get("pay_date"))
+    if not str(merged["user_id"]).startswith("ext:") and not await db.users.find_one(
+        {"id": merged["user_id"], "role": "employee"}, {"_id": 1}
+    ):
+        raise HTTPException(404, "Guard not found")
+    new_period_key = payroll_period_key(merged["user_id"], merged["period_start"], merged["period_end"])
+    duplicate = await db.payroll.find_one({
+        "id": {"$ne": payroll_id},
+        "$or": [
+            {"period_key": new_period_key},
+            {
+                "user_id": merged["user_id"],
+                "period_start": {"$regex": f"^{re.escape(merged['period_start'][:10])}"},
+                "period_end": {"$regex": f"^{re.escape(merged['period_end'][:10])}"},
+            },
+        ],
+    }, {"_id": 1})
+    if duplicate:
+        raise HTTPException(409, "A payroll record already exists for this guard and period")
+    hours_regular = float(merged.get("hours_regular") or 0)
+    hours_overtime = float(merged.get("hours_overtime") or 0)
+    rate = merged.get("pay_rate", merged.get("hourly_rate"))
+    if rate is None or float(rate) <= 0:
+        raise HTTPException(422, "Pay rate is required")
+    deductions = merged.get("deductions") or []
+    total_deductions = round(sum(float(item.get("amount") or 0) for item in deductions), 2)
+    gross = round(hours_regular * float(rate) + hours_overtime * float(rate) * float(merged.get("overtime_multiplier") or 1.5), 2)
+    tax_rate = float(merged.get("tax_rate") or 0)
+    net = round(gross * (1 - tax_rate) - total_deductions, 2)
+    if net < 0:
+        raise HTTPException(422, "Payroll deductions cannot exceed available net pay")
+    update.update({
+        "period_key": new_period_key,
+        "pay_rate": float(rate),
+        "gross": gross,
+        "total_deductions": total_deductions,
+        "net": net,
+        "updated_by": admin["id"],
+        "updated_at": iso(now_utc()),
+    })
+    try:
+        await db.payroll.update_one({"id": payroll_id}, {"$set": update})
+    except DuplicateKeyError:
+        raise HTTPException(409, "A payroll record already exists for this guard and period")
     updated = await db.payroll.find_one({"id": payroll_id}, {"_id": 0})
-    if updated and updated.get("status") == "released":
-        await send_push([updated["user_id"]], {"title": "Payroll Released", "message": f"Pay for {updated.get('period_end','')[:10]} has been released."})
+    status_changed = current.get("status") != updated.get("status")
+    if status_changed and updated.get("status") in {"released", "paid"} and not str(updated["user_id"]).startswith("ext:"):
+        status_label = "Paid" if updated["status"] == "paid" else "Released"
+        await send_push([updated["user_id"]], {"title": f"Payroll {status_label}", "message": f"Pay for {updated.get('period_end','')[:10]} is {status_label.lower()}."})
         guard = await db.users.find_one({"id": updated["user_id"]}, {"_id": 0, "email": 1, "full_name": 1})
         pay_html = notif.email_template(
-            "Your pay has been released",
+            f"Your pay is {status_label.lower()}",
             [
                 f"Hi {guard.get('full_name', 'there') if guard else 'there'},",
-                f"Your pay for the period ending <strong>{updated.get('period_end','')[:10]}</strong> has been released.",
+                f"Your pay for the period ending <strong>{updated.get('period_end','')[:10]}</strong> is {status_label.lower()}.",
                 f"Net pay: <strong>${updated.get('net', 0):.2f}</strong> (Gross: ${updated.get('gross', 0):.2f})",
             ],
             cta_text="View Pay Stub",
             cta_link="disptchr://payroll",
         )
         await asyncio.gather(
-            queue_email(guard["email"], "Your Skyhawk pay has been released", pay_html, "",
-                f"payroll:{updated['id']}:email") if guard and guard.get("email") else asyncio.sleep(0),
-            notif.save_inapp(db, [updated["user_id"]], "Payroll Released 💰", f"Pay for {updated.get('period_end','')[:10]} released. Net: ${updated.get('net', 0):.2f}", category="payroll"),
+            queue_email(guard["email"], f"Your Skyhawk pay is {status_label.lower()}", pay_html, "",
+                f"payroll:{updated['id']}:{updated['status']}:email") if guard and guard.get("email") else asyncio.sleep(0),
+            notif.save_inapp(db, [updated["user_id"]], f"Payroll {status_label} 💰", f"Pay for {updated.get('period_end','')[:10]} is {status_label.lower()}. Net: ${updated.get('net', 0):.2f}", category="payroll"),
             return_exceptions=True,
         )
     return updated
@@ -3093,9 +3422,11 @@ async def admin_update_payroll(payroll_id: str, body: AdminUpdatePayrollIn, admi
 
 @api.delete("/admin/payroll/{payroll_id}", status_code=204)
 async def admin_delete_payroll(payroll_id: str, admin=Depends(require_admin)):
-    r = await db.payroll.delete_one({"id": payroll_id})
-    if r.deleted_count == 0:
+    record = await db.payroll.find_one_and_delete({"id": payroll_id})
+    if not record:
         raise HTTPException(404, "Payroll record not found")
+    if record.get("pay_stub_url"):
+        await _delete_stored_file(record["pay_stub_url"])
 
 
 # ============================================================
@@ -3624,12 +3955,17 @@ async def _generate_pay_stub_pdf(record: dict) -> str:
     c.showPage()
     c.save()
     content = buffer.getvalue()
-    await storage.put(f"paystubs/{filename}", content, "application/pdf")
-    await db.stored_files.insert_one({
-        "id": str(uuid.uuid4()), "category": "paystubs", "stored_name": filename,
-        "owner_id": record["user_id"], "original_name": f"paystub-{record['pay_date'][:10]}.pdf",
-        "content_type": "application/pdf", "byte_size": len(content), "created_at": iso(now_utc()),
-    })
+    storage_key = f"paystubs/{filename}"
+    await storage.put(storage_key, content, "application/pdf")
+    try:
+        await db.stored_files.insert_one({
+            "id": str(uuid.uuid4()), "category": "paystubs", "stored_name": filename,
+            "owner_id": record["user_id"], "original_name": f"paystub-{record['pay_date'][:10]}.pdf",
+            "content_type": "application/pdf", "byte_size": len(content), "created_at": iso(now_utc()),
+        })
+    except Exception:
+        await storage.delete(storage_key)
+        raise
     return f"/api/files/paystubs/{filename}"
 
 
@@ -3638,11 +3974,19 @@ async def calculate_payroll(body: PayrollCalculateIn, admin=Depends(require_admi
     user = await db.users.find_one({"id": body.user_id}, SENSITIVE_USER_PROJECTION)
     if not user:
         raise HTTPException(404, "User not found")
+    validate_payroll_period(body.period_start, body.period_end, body.pay_date)
+    period_key = payroll_period_key(body.user_id, body.period_start, body.period_end)
+    if await db.payroll.find_one({
+        "user_id": body.user_id,
+        "period_start": {"$regex": f"^{re.escape(body.period_start[:10])}"},
+        "period_end": {"$regex": f"^{re.escape(body.period_end[:10])}"},
+    }, {"_id": 1}):
+        raise HTTPException(409, "A payroll record already exists for this guard and period")
     try:
-        ps = datetime.fromisoformat(body.period_start).replace(tzinfo=timezone.utc)
-        pe = datetime.fromisoformat(body.period_end).replace(tzinfo=timezone.utc)
-        pd_dt = datetime.fromisoformat(body.pay_date).replace(tzinfo=timezone.utc)
-    except ValueError:
+        ps = parse_datetime_utc(body.period_start)
+        pe = parse_datetime_utc(body.period_end)
+        pd_dt = parse_datetime_utc(body.pay_date)
+    except (TypeError, ValueError):
         raise HTTPException(400, "Invalid date format. Use ISO 8601 (YYYY-MM-DD)")
     entries = await db.timeclock.find(
         {"user_id": body.user_id, "clock_out": {"$ne": None},
@@ -3658,6 +4002,7 @@ async def calculate_payroll(body: PayrollCalculateIn, admin=Depends(require_admi
     record = {
         "id": str(uuid.uuid4()),
         "user_id": body.user_id,
+        "period_key": period_key,
         "user_name": user["full_name"],
         "employee_number": user.get("employee_number"),
         "period_start": iso(ps),
@@ -3677,9 +4022,21 @@ async def calculate_payroll(body: PayrollCalculateIn, admin=Depends(require_admi
         "created_at": iso(now_utc()),
         "created_by": admin["id"],
     }
-    record["pay_stub_url"] = await _generate_pay_stub_pdf(record)
-    await db.payroll.insert_one(record)
+    try:
+        await db.payroll.insert_one(record)
+    except DuplicateKeyError:
+        raise HTTPException(409, "A payroll record already exists for this guard and period")
     record.pop("_id", None)
+    generated_stub_url = None
+    try:
+        generated_stub_url = await _generate_pay_stub_pdf(record)
+        record["pay_stub_url"] = generated_stub_url
+        await db.payroll.update_one({"id": record["id"]}, {"$set": {"pay_stub_url": record["pay_stub_url"]}})
+    except Exception:
+        await db.payroll.delete_one({"id": record["id"]})
+        if generated_stub_url:
+            await _delete_stored_file(generated_stub_url)
+        raise
     return record
 
 
@@ -3829,6 +4186,7 @@ async def list_community_posts(type: Optional[str] = Query(default=None), user=D
 async def create_community_post(body: CommunityPostIn, user=Depends(get_current_user)):
     if body.type not in ("post", "announcement", "event", "recognition"):
         raise HTTPException(400, "Invalid post type")
+    attachments = await _validate_post_attachments(body.attachments, user["id"])
     post = {
         "id": str(uuid.uuid4()),
         "author_id": user["id"],
@@ -3839,7 +4197,7 @@ async def create_community_post(body: CommunityPostIn, user=Depends(get_current_
         "type": body.type,
         "title": None,
         "body": body.body,
-        "attachments": body.attachments,
+        "attachments": attachments,
         "created_at": iso(now_utc()),
         "likes": [],
         "comments": [],
@@ -3883,9 +4241,13 @@ async def add_community_comment(post_id: str, body: CommunityCommentIn, user=Dep
 
 @api.delete("/admin/community/posts/{post_id}")
 async def admin_delete_community_post(post_id: str, admin=Depends(require_admin)):
-    r = await db.community_posts.delete_one({"id": post_id})
-    if r.deleted_count == 0:
+    post = await db.community_posts.find_one_and_delete({"id": post_id})
+    if not post:
         raise HTTPException(404, "Post not found")
+    await asyncio.gather(*[
+        _delete_attachment_if_unreferenced(item.get("url", ""))
+        for item in post.get("attachments") or []
+    ])
     return {"deleted": True}
 
 
@@ -3896,9 +4258,13 @@ async def delete_own_community_post(post_id: str, user=Depends(get_current_user)
         enforce_manager_permission(user, "announcements.manage")
     else:
         q["author_id"] = user["id"]
-    r = await db.community_posts.delete_one(q)
-    if r.deleted_count == 0:
+    post = await db.community_posts.find_one_and_delete(q)
+    if not post:
         raise HTTPException(404, "Post not found or not authorized")
+    await asyncio.gather(*[
+        _delete_attachment_if_unreferenced(item.get("url", ""))
+        for item in post.get("attachments") or []
+    ])
     return {"deleted": True}
 
 
@@ -3909,12 +4275,19 @@ async def edit_own_community_post(post_id: str, body: CommunityEditIn, user=Depe
         enforce_manager_permission(user, "announcements.manage")
     else:
         q["author_id"] = user["id"]
-    r = await db.community_posts.update_one(
-        q,
-        {"$set": {"body": body.body, "attachments": body.attachments, "updated_at": iso(now_utc())}}
-    )
-    if r.matched_count == 0:
+    existing = await db.community_posts.find_one(q)
+    if not existing:
         raise HTTPException(404, "Post not found or not authorized")
+    existing_urls = {item.get("url") for item in existing.get("attachments") or [] if item.get("url")}
+    attachments = await _validate_post_attachments(body.attachments, user["id"], existing_urls)
+    await db.community_posts.update_one(
+        {"id": post_id},
+        {"$set": {"body": body.body, "attachments": attachments, "updated_at": iso(now_utc())}}
+    )
+    retained_urls = {item.get("url") for item in attachments}
+    await asyncio.gather(*[
+        _delete_attachment_if_unreferenced(url) for url in existing_urls - retained_urls
+    ])
     post = await db.community_posts.find_one({"id": post_id}, {"_id": 0})
     return _serialize_post(post, user["id"])
 

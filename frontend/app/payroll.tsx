@@ -14,6 +14,7 @@ import { errorMessage, LoadError } from "@/src/components/LoadError";
 const STAGES = [
   { id: "submitted", label: "Submitted" },
   { id: "under_review", label: "Under Review" },
+  { id: "approved", label: "Approved" },
   { id: "released", label: "Released" },
   { id: "paid", label: "Paid" },
 ];

@@ -568,7 +568,7 @@ export default function Payroll() {
 
       {/* ── Status tabs ── */}
       <div className="flex gap-1 mb-5 border-b border-gray-100 pb-0">
-        {['', 'submitted', 'under_review', 'approved', 'paid'].map(s => {
+        {['', 'submitted', 'under_review', 'approved', 'released', 'paid'].map(s => {
           const label = s ? s.replace('_', ' ').charAt(0).toUpperCase() + s.replace('_', ' ').slice(1) : 'All';
           return (
             <button key={s} onClick={() => setFilterStatus(s)}
@@ -1028,7 +1028,7 @@ export default function Payroll() {
               <div>
                 <label className="label">Status</label>
                 <select className="input" value={form.status} onChange={f('status')}>
-                  {['submitted','under_review','approved','paid','cancelled'].map(s => (
+                  {['submitted','under_review','approved','released','paid','cancelled'].map(s => (
                     <option key={s} value={s}>{s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</option>
                   ))}
                 </select>

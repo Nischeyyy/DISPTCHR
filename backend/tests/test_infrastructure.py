@@ -33,8 +33,28 @@ def test_local_object_storage_round_trip(tmp_path, monkeypatch):
     content, content_type = asyncio.run(storage.get("attachments/record.pdf"))
     assert content == b"%PDF-test"
     assert content_type is None
+    asyncio.run(storage.delete("attachments/record.pdf"))
+    assert asyncio.run(storage.exists("attachments/record.pdf")) is False
+    asyncio.run(storage.delete("attachments/record.pdf"))
     with pytest.raises(ValueError):
         asyncio.run(storage.get("../outside.txt"))
+
+
+def test_s3_object_storage_delete_uses_configured_bucket(tmp_path, monkeypatch):
+    class FakeS3:
+        def __init__(self):
+            self.deleted = []
+
+        def delete_object(self, **kwargs):
+            self.deleted.append(kwargs)
+
+    monkeypatch.setenv("STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("S3_BUCKET", "private-test-bucket")
+    storage = ObjectStorage(tmp_path, production=False)
+    fake = FakeS3()
+    storage._client = fake
+    asyncio.run(storage.delete("attachments/record.pdf"))
+    assert fake.deleted == [{"Bucket": "private-test-bucket", "Key": "attachments/record.pdf"}]
 
 
 def test_production_rejects_local_storage(tmp_path, monkeypatch):
