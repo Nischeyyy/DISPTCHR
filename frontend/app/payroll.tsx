@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable,
-  ActivityIndicator, Modal, Linking,
+  ActivityIndicator, Modal, Linking, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -9,6 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { theme } from "@/src/theme";
 import { api, getProtectedFileUrl } from "@/src/api/client";
 import { formatCurrency } from "@/src/utils/format";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 const STAGES = [
   { id: "submitted", label: "Submitted" },
@@ -23,10 +24,19 @@ export default function Payroll() {
   const [loading, setLoading] = useState(true);
   const [stubPeriod, setStubPeriod] = useState<any>(null);
   const [stubLoading, setStubLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
-    try { const d = await api("/payroll"); setData(d); } catch {}
-    setLoading(false);
+    setLoading(true);
+    setLoadError("");
+    try {
+      const d = await api("/payroll");
+      setData(d);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load payroll information."));
+    } finally {
+      setLoading(false);
+    }
   }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -37,8 +47,12 @@ export default function Payroll() {
       try {
         const detail = await api(`/payroll/${period.id}/stub`);
         setStubPeriod(detail);
-      } catch {}
-      setStubLoading(false);
+      } catch (error) {
+        Alert.alert("Pay stub unavailable", errorMessage(error, "Unable to load this pay stub."));
+        setStubPeriod(null);
+      } finally {
+        setStubLoading(false);
+      }
     }
   };
 
@@ -57,6 +71,10 @@ export default function Payroll() {
         <ActivityIndicator color={theme.colors.textSecondary} style={{ marginTop: 40 }} />
       </SafeAreaView>
     );
+  }
+
+  if (loadError && !data) {
+    return <SafeAreaView style={styles.safe}><LoadError message={loadError} onRetry={load} /></SafeAreaView>;
   }
 
   const current = data?.current;

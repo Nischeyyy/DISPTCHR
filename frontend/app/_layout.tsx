@@ -48,12 +48,9 @@ function AuthGate() {
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === "(auth)";
-    const inTabsGroup = segments[0] === "(tabs)";
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/login");
     } else if (user && inAuthGroup) {
-      router.replace("/(tabs)");
-    } else if (user && !inTabsGroup && !inAuthGroup) {
       router.replace("/(tabs)");
     }
   }, [user, loading, segments, router]);
@@ -71,7 +68,9 @@ function AuthGate() {
           method: "POST",
           body: { user_id: user.id, platform: Platform.OS, device_token: t.data as string },
         });
-      } catch {}
+      } catch (registrationError) {
+        console.warn("Push registration failed", registrationError);
+      }
     })();
   }, [user]);
 

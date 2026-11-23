@@ -9,6 +9,7 @@ import { Button } from "@/src/ui";
 import { api } from "@/src/api/client";
 import { relativeTime } from "@/src/utils/format";
 import { success as hapticSuccess } from "@/src/utils/haptics";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 const TYPES = [
   { id: "incident", label: "Incident" },
@@ -32,12 +33,16 @@ export default function Incidents() {
   const [items, setItems] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState("");
 
   const loadHistory = useCallback(async () => {
+    setHistoryError("");
     try {
       const d = await api("/incidents");
       setItems(d.incidents);
-    } catch {}
+    } catch (loadFailure) {
+      setHistoryError(errorMessage(loadFailure, "Unable to load incident history."));
+    }
   }, []);
   useFocusEffect(useCallback(() => { loadHistory(); }, [loadHistory]));
 
@@ -145,7 +150,7 @@ export default function Incidents() {
           </ScrollView>
         </KeyboardAvoidingView>
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+        historyError ? <LoadError message={historyError} onRetry={loadHistory} /> : <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
           {items.length === 0 && <Text style={styles.empty}>No incident reports</Text>}
           {items.map((i, idx) => {
             const statusColor =

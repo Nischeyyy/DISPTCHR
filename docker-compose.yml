@@ -55,6 +55,7 @@ services:
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:?Set a Twilio account SID}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:?Set a Twilio auth token}
       TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:?Set a Twilio sender number}
+      DISPATCH_PHONE: ${DISPATCH_PHONE:?Set the real company dispatch number in E.164 format}
       EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
     restart: unless-stopped
     healthcheck:

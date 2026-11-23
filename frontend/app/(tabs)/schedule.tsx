@@ -6,6 +6,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { light } from "@/src/theme/light";
 import { api } from "@/src/api/client";
 import { tap } from "@/src/utils/haptics";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 type ViewMode = "week" | "month" | "calendar";
 
@@ -50,6 +51,7 @@ export default function Schedule() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const weekEnd = useMemo(() => addDays(weekAnchor, 7), [weekAnchor]);
   const calGrid = useMemo(() => {
@@ -68,6 +70,7 @@ export default function Schedule() {
 
   const load = useCallback(async () => {
     setFetching(true);
+    setLoadError("");
     try {
       const [statsData] = await Promise.all([api("/schedule/stats")]);
       setStats(statsData);
@@ -83,9 +86,12 @@ export default function Schedule() {
         const d = await api(`/schedule?start=${gridStart.toISOString()}&end=${gridEnd.toISOString()}`);
         setCalShifts(d.shifts || []);
       }
-    } catch {}
-    setFetching(false);
-    setInitialLoading(false);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load your schedule."));
+    } finally {
+      setFetching(false);
+      setInitialLoading(false);
+    }
   }, [view, weekAnchor, weekEnd, calGrid]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -123,6 +129,10 @@ export default function Schedule() {
     if (!selectedDay) return [];
     return calShifts.filter((s) => isSameDay(new Date(s.start), selectedDay)).sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
   }, [calShifts, selectedDay]);
+
+  if (!initialLoading && loadError && !stats) {
+    return <SafeAreaView style={styles.safe}><LoadError message={loadError} onRetry={load} /></SafeAreaView>;
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>

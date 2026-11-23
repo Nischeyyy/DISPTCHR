@@ -11,6 +11,7 @@ import { api } from "@/src/api/client";
 import { formatDate, formatShiftTime, formatCurrency, hoursBetween } from "@/src/utils/format";
 import { StatusPill } from "@/src/ui";
 import { impact as hapticImpact, success as hapticSuccess } from "@/src/utils/haptics";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 const STATUS_TONE: Record<string, "accent" | "warning" | "verified" | "danger" | "neutral"> = {
   open: "accent",
@@ -30,14 +31,20 @@ export default function AdminShiftSwaps() {
   const [acting, setActing] = useState<string | null>(null);
   const [filter, setFilter] = useState<SwapFilter>("accepted");
   const [toast, setToast] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
     try {
       const q = filter === "all" ? "" : "?status=accepted";
       const d: any = await api(`/admin/shift-swaps${q}`);
       setSwaps(d.swaps ?? []);
-    } catch {}
-    setLoading(false);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load shift swap requests."));
+    } finally {
+      setLoading(false);
+    }
   }, [filter]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -98,6 +105,8 @@ export default function AdminShiftSwaps() {
 
       {loading ? (
         <ActivityIndicator color={theme.colors.textSecondary} style={{ marginTop: 40 }} />
+      ) : loadError ? (
+        <LoadError message={loadError} onRetry={load} />
       ) : (
         <ScrollView
           contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 60 }}

@@ -84,6 +84,9 @@ if IS_PRODUCTION and RATE_LIMIT_STORAGE_URI == "memory://":
 CONTROL_PANEL_API_KEY = os.environ.get("CONTROL_PANEL_API_KEY", "")
 METRICS_TOKEN = os.environ.get("METRICS_TOKEN", "").strip()
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "").strip()
+DISPATCH_PHONE = os.environ.get("DISPATCH_PHONE", "").strip()
+if DISPATCH_PHONE and not re.fullmatch(r"\+[1-9]\d{7,14}", DISPATCH_PHONE):
+    raise RuntimeError("DISPATCH_PHONE must use E.164 format, for example +14165551234")
 
 _configured_pii_key = os.environ.get("PII_ENCRYPTION_KEY", "").strip()
 if IS_PRODUCTION and not _configured_pii_key:
@@ -119,7 +122,7 @@ if IS_PRODUCTION:
         raise RuntimeError("JWT_SECRET must contain at least 32 characters in production")
     for required_key in (
         "CONTROL_PANEL_API_KEY", "METRICS_TOKEN", "SENDGRID_API_KEY", "SENDGRID_FROM_EMAIL",
-        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
+        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "DISPATCH_PHONE",
     ):
         _require_env(required_key)
     if not CORS_ORIGINS or any("localhost" in origin or "127.0.0.1" in origin for origin in CORS_ORIGINS):
@@ -529,8 +532,8 @@ class SiteAckIn(BaseModel):
 
 
 class SOSIn(BaseModel):
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     message: Optional[str] = Field(default=None, max_length=500)
 
 
@@ -1342,6 +1345,14 @@ async def dashboard(request: Request, user=Depends(get_current_user)):
         expiry = parse_datetime_utc(user["licence_expiry"])
         licence_days_remaining = (expiry - now).days
 
+    emergency_contacts = []
+    if DISPATCH_PHONE:
+        emergency_contacts.append({"name": "HQ Dispatch", "phone": DISPATCH_PHONE})
+    emergency_contacts.append({"name": "911 Emergency", "phone": "911"})
+    supervisor_phone = (today_shift or {}).get("site", {}).get("supervisor_phone")
+    if supervisor_phone:
+        emergency_contacts.append({"name": "Site Supervisor", "phone": supervisor_phone})
+
     return {
         "today_shift": today_shift,
         "next_shift": next_shift,
@@ -1349,11 +1360,7 @@ async def dashboard(request: Request, user=Depends(get_current_user)):
         "unread_announcements": unread_ann,
         "latest_payroll": latest_payroll,
         "licence_days_remaining": licence_days_remaining,
-        "emergency_contacts": [
-            {"name": "HQ Dispatch", "phone": "+1 416 555 0000"},
-            {"name": "911 Emergency", "phone": "911"},
-            {"name": "Site Supervisor", "phone": (today_shift or {}).get("site", {}).get("supervisor_phone")},
-        ],
+        "emergency_contacts": emergency_contacts,
     }
 
 
@@ -2998,8 +3005,15 @@ async def admin_update_timeclock(entry_id: str, body: AdminUpdateTimeclockIn, ad
 
 @api.post("/sos", status_code=201)
 async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
+    if (body.latitude is None) != (body.longitude is None):
+        raise HTTPException(422, "latitude and longitude must be supplied together")
     alert_id = str(uuid.uuid4())
     now = now_utc()
+    location_available = body.latitude is not None and body.longitude is not None
+    location_text = (
+        f"{body.latitude:.5f},{body.longitude:.5f}"
+        if location_available else "unavailable"
+    )
     alert = {
         "id": alert_id,
         "user_id": user["id"],
@@ -3007,6 +3021,7 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         "employee_number": user.get("employee_number"),
         "latitude": body.latitude,
         "longitude": body.longitude,
+        "location_available": location_available,
         "message": body.message,
         "status": "active",
         "created_at": iso(now),
@@ -3021,7 +3036,7 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         "user_name": user["full_name"],
         "type": "incident",
         "site_id": None,
-        "description": f"SOS ALERT triggered by {user['full_name']}. GPS: {body.latitude:.5f},{body.longitude:.5f}. {body.message or ''}".strip(),
+        "description": f"SOS ALERT triggered by {user['full_name']}. GPS: {location_text}. {body.message or ''}".strip(),
         "severity": "critical",
         "witness_name": None,
         "witness_contact": None,
@@ -3037,9 +3052,10 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         "sos.manage", {"id": 1, "email": 1, "phone": 1, "_id": 0}
     )
     admin_ids = [a["id"] for a in admins]
+    push_location = f" · {body.latitude:.4f},{body.longitude:.4f}" if location_available else " · GPS unavailable"
     await send_push(
         admin_ids,
-        {"title": f"🆘 SOS — {user['full_name']}", "message": f"{body.message or 'Guard needs immediate assistance'} · {body.latitude:.4f},{body.longitude:.4f}"},
+        {"title": f"🆘 SOS — {user['full_name']}", "message": f"{body.message or 'Guard needs immediate assistance'}{push_location}"},
         idempotency_key=f"sos-{alert_id}",
     )
     # SOS is critical, but only active managers explicitly assigned SOS access
@@ -3049,14 +3065,14 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         [
             f"<strong style='color:#EF4444'>EMERGENCY — Guard needs immediate assistance.</strong>",
             f"<strong>Guard:</strong> {user['full_name']} (#{user.get('employee_number', 'N/A')})",
-            f"<strong>GPS:</strong> {body.latitude:.5f}, {body.longitude:.5f}",
+            f"<strong>GPS:</strong> {location_text}",
             f"<strong>Message:</strong> {body.message or 'No message provided'}",
             f"<strong>Time:</strong> {iso(now)}",
         ],
     )
     sms_body = (
         f"🆘 SOS ALERT: {user['full_name']} needs help. "
-        f"GPS: {body.latitude:.4f},{body.longitude:.4f}. "
+        f"GPS: {location_text}. "
         f"{body.message or 'Immediate assistance required.'}"
     )
     await asyncio.gather(
@@ -3067,7 +3083,7 @@ async def trigger_sos(body: SOSIn, user=Depends(get_current_user)):
         notif.save_inapp(db, [user["id"]], "SOS Alert Sent", "Your emergency alert has been sent to authorized response managers.", category="sos"),
         return_exceptions=True,
     )
-    logger.warning("SOS triggered by user %s at %s,%s", user["id"], body.latitude, body.longitude)
+    logger.warning("SOS triggered by user %s; GPS %s", user["id"], location_text)
     return alert
 
 
@@ -3110,11 +3126,11 @@ async def acknowledge_sos(alert_id: str, admin=Depends(require_admin)):
 @api.post("/sos/{alert_id}/resolve")
 async def resolve_sos(alert_id: str, admin=Depends(require_admin)):
     r = await db.sos_alerts.update_one(
-        {"id": alert_id},
+        {"id": alert_id, "status": {"$in": ["active", "acknowledged"]}},
         {"$set": {"status": "resolved", "resolved_at": iso(now_utc()), "resolved_by": admin["id"]}},
     )
     if r.matched_count == 0:
-        raise HTTPException(404, "Alert not found")
+        raise HTTPException(404, "Alert not found or already resolved")
     return {"resolved": True}
 
 

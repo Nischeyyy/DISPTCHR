@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -7,18 +7,25 @@ import { theme } from "@/src/theme";
 import { api } from "@/src/api/client";
 import { relativeTime } from "@/src/utils/format";
 import { success as hapticSuccess } from "@/src/utils/haptics";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 export default function Announcements() {
   const router = useRouter();
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
     try {
       const d = await api("/announcements");
       setItems(d.announcements);
-    } catch {}
-    setLoading(false);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load announcements."));
+    } finally {
+      setLoading(false);
+    }
   }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -27,7 +34,9 @@ export default function Announcements() {
       await api(`/announcements/${id}/acknowledge`, { method: "POST" });
       hapticSuccess();
       setItems((prev) => prev.map((a) => a.id === id ? { ...a, read: true, read_count: (a.read_count || 0) + 1 } : a));
-    } catch {}
+    } catch (error) {
+      Alert.alert("Update failed", errorMessage(error, "Unable to mark this announcement as read."));
+    }
   };
 
   return (
@@ -40,6 +49,8 @@ export default function Announcements() {
       </View>
       {loading ? (
         <ActivityIndicator color={theme.colors.textSecondary} style={{ marginTop: 40 }} />
+      ) : loadError ? (
+        <LoadError message={loadError} onRetry={load} />
       ) : (
         <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
           {items.length === 0 && <Text style={styles.empty}>No announcements</Text>}

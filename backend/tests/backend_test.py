@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 import pytest
 import httpx
+from pymongo import MongoClient
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("DISPTCHR_E2E_ENABLED") != "1",
@@ -22,6 +23,7 @@ ADMIN_PASSWORD = os.environ.get("DISPTCHR_E2E_MANAGER_PASSWORD", "")
 ADMIN_MFA_CODE = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_CODE", "")
 ADMIN_MFA_SECRET = os.environ.get("DISPTCHR_E2E_MANAGER_MFA_SECRET", "")
 ADMIN_RECOVERY_CODE = ""
+ADMIN_SOS_RECOVERY_CODE = ""
 SECOND_GUARD_EMAIL = ""
 SECOND_GUARD_PASSWORD = ""
 SWAP_SHIFT_ID = ""
@@ -62,10 +64,25 @@ def expect(response, status_code):
 def bootstrap_disposable_environment(session):
     """Create a complete disposable company dataset through public application APIs only."""
     if not BOOTSTRAP_DISPOSABLE:
+        yield
         return
 
+    database_name = os.environ.get("DB_NAME", "")
+    mongo_url = os.environ.get("MONGO_URL", "")
+    assert database_name.startswith("disptchr_e2e_"), "Disposable E2E database must use the disptchr_e2e_ prefix"
+    assert mongo_url, "Disposable E2E bootstrap requires MONGO_URL"
+    cleanup_client = MongoClient(mongo_url, serverSelectionTimeoutMS=5000)
+    database = cleanup_client[database_name]
+    non_empty_collections = [
+        name for name in database.list_collection_names()
+        if database[name].count_documents({}, limit=1)
+    ]
+    assert not non_empty_collections, (
+        f"Disposable E2E database must start empty; data exists in {', '.join(non_empty_collections)}"
+    )
+
     global GUARD_EMAIL, GUARD_PASSWORD, ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_MFA_SECRET
-    global ADMIN_RECOVERY_CODE, SECOND_GUARD_EMAIL, SECOND_GUARD_PASSWORD, SWAP_SHIFT_ID
+    global ADMIN_RECOVERY_CODE, ADMIN_SOS_RECOVERY_CODE, SECOND_GUARD_EMAIL, SECOND_GUARD_PASSWORD, SWAP_SHIFT_ID
     assert BASE_URL and CONTROL_KEY, "Disposable E2E bootstrap requires its API URL and control key"
     GUARD_EMAIL = "guard.e2e@skyhawksecurity.ca"
     GUARD_PASSWORD = "Guard-E2E-password-2026"
@@ -93,6 +110,7 @@ def bootstrap_disposable_environment(session):
     ), 201)
     ADMIN_MFA_SECRET = manager["mfa_setup"]["secret"]
     ADMIN_RECOVERY_CODE = manager["mfa_setup"]["recovery_codes"][1]
+    ADMIN_SOS_RECOVERY_CODE = manager["mfa_setup"]["recovery_codes"][2]
 
     # Use a one-time recovery code for setup so the TOTP remains unused for the login test.
     expect(session.post(
@@ -118,6 +136,7 @@ def bootstrap_disposable_environment(session):
             "certifications": ["First Aid"],
         },
     ), 201)
+
     expect(session.post(
         f"{BASE_URL}/api/admin/guards",
         json={
@@ -208,6 +227,10 @@ def bootstrap_disposable_environment(session):
         headers={"Authorization": f"Bearer {guard_login['access_token']}"},
         json={"type": "security_licence", "name": "Ontario Security Licence", "number": "E2E-LIC-001", "expiry": expiry},
     ), 201)
+
+    yield
+    cleanup_client.drop_database(database_name)
+    cleanup_client.close()
 
 
 @pytest.fixture(scope="session")
@@ -399,6 +422,52 @@ class TestShiftSwaps:
 
         expect(session.get(f"{BASE_URL}/api/shifts/{SWAP_SHIFT_ID}", headers=covering_headers), 200)
         assert session.get(f"{BASE_URL}/api/shifts/{SWAP_SHIFT_ID}", headers=guard_headers).status_code == 404
+
+
+# ---- emergency SOS ----
+class TestSos:
+    def test_location_optional_manager_acknowledgement_and_resolution(self, session, guard_headers):
+        partial_location = session.post(
+            f"{BASE_URL}/api/sos",
+            headers=guard_headers,
+            json={"latitude": 43.65, "message": "This incomplete location must be rejected."},
+        )
+        assert partial_location.status_code == 422
+
+        created = expect(session.post(
+            f"{BASE_URL}/api/sos",
+            headers=guard_headers,
+            json={"message": "Disposable end-to-end emergency alert."},
+        ), 201)
+        assert created["status"] == "active"
+        assert created["location_available"] is False
+        assert created["latitude"] is None
+        assert created["longitude"] is None
+
+        manager_headers = {"Content-Type": "application/json", "Origin": E2E_ORIGIN}
+        with httpx.Client(timeout=20.0, headers=manager_headers) as manager_session:
+            expect(manager_session.post(
+                f"{BASE_URL}/api/auth/manager-login",
+                json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "mfa_code": ADMIN_SOS_RECOVERY_CODE},
+            ), 200)
+            active = expect(manager_session.get(f"{BASE_URL}/api/sos/active"), 200)
+            current = next(item for item in active["alerts"] if item["id"] == created["id"])
+            assert current["created_at"]
+            assert current["status"] == "active"
+
+            expect(manager_session.post(f"{BASE_URL}/api/sos/{created['id']}/acknowledge"), 200)
+            acknowledged = expect(manager_session.get(f"{BASE_URL}/api/sos/active"), 200)
+            current = next(item for item in acknowledged["alerts"] if item["id"] == created["id"])
+            assert current["status"] == "acknowledged"
+            assert current["acknowledged_at"]
+
+            expect(manager_session.post(f"{BASE_URL}/api/sos/{created['id']}/resolve"), 200)
+            active_after_resolution = expect(manager_session.get(f"{BASE_URL}/api/sos/active"), 200)
+            assert all(item["id"] != created["id"] for item in active_after_resolution["alerts"])
+            history = expect(manager_session.get(f"{BASE_URL}/api/sos/history"), 200)
+            resolved = next(item for item in history["alerts"] if item["id"] == created["id"])
+            assert resolved["status"] == "resolved"
+            assert resolved["resolved_at"]
 
 
 # ---- time clock ----

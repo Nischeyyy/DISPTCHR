@@ -33,6 +33,7 @@ export default function TimeClock() {
   const [loc, setLoc] = useState<Location.LocationObject | null>(null);
   const [selfie, setSelfie] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [locationWarning, setLocationWarning] = useState<string | null>(null);
   const [now, setNow] = useState(new Date());
   const cameraRef = useRef<CameraView | null>(null);
 
@@ -83,13 +84,19 @@ export default function TimeClock() {
     const ping = async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== "granted") return;
+        if (status !== "granted") {
+          setLocationWarning("Live location sharing is paused because location permission is unavailable.");
+          return;
+        }
         const l = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         await api("/timeclock/location-ping", {
           method: "POST",
           body: { latitude: l.coords.latitude, longitude: l.coords.longitude, accuracy_m: l.coords.accuracy },
         });
-      } catch {}
+        setLocationWarning(null);
+      } catch {
+        setLocationWarning("Live location could not be updated. Check connectivity and location services.");
+      }
     };
     ping(); // immediate ping on mount / clock-in
     const t = setInterval(ping, 3 * 60 * 1000);
@@ -193,6 +200,7 @@ export default function TimeClock() {
             {active.geofence_ok === false && (
               <Text style={styles.warnText}>Outside geofence · {Math.round(active.geofence_distance_m || 0)}m from site</Text>
             )}
+            {locationWarning && <Text style={styles.warnText}>{locationWarning}</Text>}
           </View>
 
           <View style={{ marginTop: 32, gap: 10 }}>

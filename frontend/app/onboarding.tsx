@@ -9,6 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { api, apiUpload } from "@/src/api/client";
 import { Button } from "@/src/ui";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 const W = {
   bg: "#FFFFFF",
@@ -46,6 +47,7 @@ export default function Onboarding() {
   const [loading, setLoading] = useState(true);
   const [activeStep, setActiveStep] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   // Document form
   const [docType, setDocType] = useState("security_licence");
@@ -72,11 +74,16 @@ export default function Onboarding() {
   const [agreed, setAgreed] = useState(false);
 
   const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError("");
     try {
       const d = await api("/onboarding/status");
       setData(d);
-    } catch {}
-    setLoading(false);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load onboarding progress."));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -221,6 +228,10 @@ export default function Onboarding() {
         <ActivityIndicator color={W.textSecondary} style={{ marginTop: 40 }} />
       </SafeAreaView>
     );
+  }
+
+  if (loadError && !data) {
+    return <SafeAreaView style={styles.safe}><LoadError message={loadError} onRetry={load} /></SafeAreaView>;
   }
 
   const status = data?.status || {};

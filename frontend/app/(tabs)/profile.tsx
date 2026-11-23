@@ -9,6 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { Avatar } from "@/src/ui";
 import { api } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 // ─── Light palette (matches Schedule / reference design) ───────────────────
 const C = {
@@ -60,16 +61,31 @@ export default function Profile() {
   const router = useRouter();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
-    try { const d = await api("/profile"); setData(d); } catch {}
-    setLoading(false);
+    setLoading(true);
+    setLoadError("");
+    try {
+      const d = await api("/profile");
+      setData(d);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load your profile."));
+    } finally {
+      setLoading(false);
+    }
   }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   if (loading) return (
     <SafeAreaView style={s.safe}>
       <ActivityIndicator color={C.textSecondary} style={{ marginTop: 60 }} />
+    </SafeAreaView>
+  );
+
+  if (loadError && !data) return (
+    <SafeAreaView style={s.safe}>
+      <LoadError message={loadError} onRetry={load} />
     </SafeAreaView>
   );
 

@@ -27,6 +27,7 @@ def production_environment() -> dict[str, str]:
         "TWILIO_ACCOUNT_SID": "twilio-test-value",
         "TWILIO_AUTH_TOKEN": "twilio-test-token",
         "TWILIO_FROM_NUMBER": "+14165550123",
+        "DISPATCH_PHONE": "+14165550124",
     })
     return environment
 
@@ -54,3 +55,11 @@ def test_production_configuration_rejects_localhost_cors_origin():
     result = import_server(environment)
     assert result.returncode != 0
     assert "production HTTPS origins" in result.stderr
+
+
+def test_production_configuration_rejects_invalid_dispatch_number():
+    environment = production_environment()
+    environment["DISPATCH_PHONE"] = "416-555-0124"
+    result = import_server(environment)
+    assert result.returncode != 0
+    assert "E.164" in result.stderr

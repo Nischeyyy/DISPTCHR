@@ -11,6 +11,7 @@ import { api, apiUpload, getProtectedFileUrl } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
 import { relativeTime } from "@/src/utils/format";
 import { success as hapticSuccess } from "@/src/utils/haptics";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 // ─── White scheme with black buttons (matches the clean light look) ───────────
 const C = {
@@ -78,17 +79,22 @@ export default function Community() {
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const composerInputRef = useRef<React.ComponentRef<typeof TextInput>>(null);
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
   const isAdmin = user?.role === "admin";
 
   const load = useCallback(async (f: string) => {
+    setLoadError("");
     try {
       const q = f === "all" ? "" : `?type=${f}`;
       const d = await api(`/community/posts${q}`);
       setPosts(d.posts || []);
-    } catch {}
-    setLoading(false);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load community posts."));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(filter); }, [load, filter]));
@@ -126,8 +132,11 @@ export default function Community() {
       setPendingAttachment(null);
       if (filter === "all") setPosts((prev) => [created, ...prev]);
       else load(filter);
-    } catch {}
-    setPosting(false);
+    } catch (error) {
+      Alert.alert("Post failed", errorMessage(error, "Unable to publish your post."));
+    } finally {
+      setPosting(false);
+    }
   };
 
   const canManage = (p: any) => isAdmin || p.author_id === user?.id;
@@ -147,7 +156,12 @@ export default function Community() {
       {
         text: "Delete", style: "destructive", onPress: async () => {
           setPosts((prev) => prev.filter((p) => p.id !== id));
-          try { await api(`/community/posts/${id}`, { method: "DELETE" }); } catch { load(filter); }
+          try {
+            await api(`/community/posts/${id}`, { method: "DELETE" });
+          } catch (error) {
+            await load(filter);
+            Alert.alert("Delete failed", errorMessage(error, "Unable to delete this post."));
+          }
         },
       },
     ]);
@@ -189,8 +203,9 @@ export default function Community() {
       : p));
     try {
       await api(`/community/posts/${id}/like`, { method: "POST" });
-    } catch {
-      load(filter);
+    } catch (error) {
+      await load(filter);
+      Alert.alert("Update failed", errorMessage(error, "Unable to update this reaction."));
     }
   };
 
@@ -201,7 +216,9 @@ export default function Community() {
       const updated = await api(`/community/posts/${id}/comments`, { method: "POST", body: { body } });
       setPosts((prev) => prev.map((p) => (p.id === id ? updated : p)));
       setCommentDraft("");
-    } catch {}
+    } catch (error) {
+      Alert.alert("Comment failed", errorMessage(error, "Unable to publish your comment."));
+    }
   };
 
   const filteredPosts = posts.filter((p) => {
@@ -361,6 +378,8 @@ export default function Community() {
             {/* Feed */}
             {loading ? (
               <ActivityIndicator color={C.textSecondary} style={{ marginTop: 30 }} />
+            ) : loadError ? (
+              <LoadError message={loadError} onRetry={() => load(filter)} />
             ) : filteredPosts.length === 0 ? (
               <Text style={styles.empty}>{searchQuery ? "No posts match your search" : "Nothing here yet"}</Text>
             ) : (

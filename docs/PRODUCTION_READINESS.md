@@ -15,8 +15,8 @@ No fake business records, demo accounts, default passwords, or development authe
 | --- | --- | --- |
 | Workforce backend syntax | Green | all production Python modules compile |
 | Backend security scan | Green | Bandit reports no findings; the production Python dependency audit reports 0 known vulnerabilities |
-| Backend automated tests | Green | 45 core tests passed; 23 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
-| Manager Portal | Green | 6 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
+| Backend automated tests | Green | 46 core tests passed; 24 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
+| Manager Portal | Green | 9 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Disptchr Panel database | Green | schema v6 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
 | Disptchr Panel | Green | TypeScript passed; 5 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities |
 | Guard application | Green | lint and TypeScript passed; Expo Doctor 20/20; dependency audit reports 0 vulnerabilities |
@@ -38,7 +38,10 @@ No fake business records, demo accounts, default passwords, or development authe
 ### Workforce operations
 
 - Guard onboarding, assigned schedules, shift details and acknowledgement, open-shift claiming, shift swaps, timeclock, breaks, geofencing, location heartbeat, selfie verification, incidents, SOS, announcements, community, payroll views, credentials, notifications, and password recovery are connected to the API and database.
+- Guard data screens expose API failures with an accessible error state and an explicit retry path; create, update, acknowledgement, attachment, comment, reaction, and pay-stub failures are surfaced to the user instead of being silently discarded.
 - Shift swaps now cover the complete guarded lifecycle: a guard posts a specific assigned shift with an optional reason, another guard volunteers, a scheduling manager reviews the accepted request under a single-winner decision lock, the assignment transfers, both guards receive the recorded decision, and duplicate active requests are blocked by a database invariant.
+- Emergency SOS uses one shared API contract across the guard app and Manager Portal: alerts remain sendable when GPS is unavailable without inventing coordinates, managers can acknowledge and resolve the actual backend states, real coordinates open the correct map, and the resulting critical incident remains linked to the alert.
+- The guard dashboard no longer contains a sample dispatch number. It uses the validated `DISPATCH_PHONE` production setting and disables the call action when local development has no approved company number.
 - Time Clock resolves a real assigned shift even when opened directly, displays the assignment, blocks capture outside the allowed window, and is independently revalidated by the API.
 - Manager Portal provides permission-controlled guards, sites, shifts, open shifts, timeclock, live locations, incidents, SOS, announcements, compliance, shift swaps, and payroll workflows.
 - Durable email, SMS, and Expo notification jobs use leases, retry/backoff, retention, dead-letter state, and a separately monitored worker.
@@ -58,7 +61,7 @@ These items cannot truthfully be marked green from source code or a local machin
 
 1. **Credential rotation:** rotate every MongoDB password and signing/control secret ever pasted into a chat before using production.
 2. **Production infrastructure:** provision managed MongoDB, PostgreSQL, Redis, private S3-compatible storage, backups, point-in-time recovery, monitoring, log retention, and alert escalation.
-3. **Delivery providers:** configure verified SendGrid, Twilio, Expo Push, and Sentry accounts and prove real email, SMS, push, and error delivery in staging.
+3. **Delivery providers and dispatch line:** configure verified SendGrid, Twilio, Expo Push, and Sentry accounts, provide the real company `DISPATCH_PHONE`, and prove real email, SMS, push, call-link, and error delivery in staging.
 4. **Initial identity:** provision the first real director account and enroll its MFA. No default director exists.
 5. **Business data:** approve and import real manager, guard, site, rate, invoice, and operational data. The workforce development database contains no invented records.
 6. **Native ownership:** bind the Expo project, add company-owned Apple and Google signing credentials, validate on physical devices, complete privacy declarations, and submit through company store accounts.

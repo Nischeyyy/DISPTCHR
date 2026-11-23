@@ -1,13 +1,12 @@
 import React, { useCallback, useState, useEffect } from "react";
-import { View, Text, StyleSheet, ScrollView, RefreshControl, Pressable, ActivityIndicator, Animated, Linking, Modal } from "react-native";
+import { View, Text, StyleSheet, ScrollView, RefreshControl, Pressable, ActivityIndicator, Animated, Linking } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import * as Location from "expo-location";
 import { Avatar } from "@/src/ui";
 import { api } from "@/src/api/client";
 import { useAuth } from "@/src/auth/AuthContext";
-import { tap, warn as hapticWarn } from "@/src/utils/haptics";
+import { tap } from "@/src/utils/haptics";
 import { startsIn } from "@/src/utils/format";
 import { light } from "@/src/theme/light";
 
@@ -40,8 +39,6 @@ export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [sosOpen, setSosOpen] = useState(false);
-  const [sosSubmitting, setSosSubmitting] = useState(false);
   const [fade] = useState(() => new Animated.Value(0));
 
   const load = useCallback(async () => {
@@ -112,39 +109,7 @@ export default function Dashboard() {
   const today = data?.today_shift;
   const activeClock = data?.active_clock;
   const firstName = user?.full_name?.split(" ")[0];
-  const dispatchNumber = "+14165550000";
-
-  const triggerSos = async () => {
-    setSosSubmitting(true);
-    try {
-      hapticWarn();
-      let lat: number | undefined;
-      let lng: number | undefined;
-      try {
-        const p = await Location.requestForegroundPermissionsAsync();
-        if (p.status === "granted") {
-          const l = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-          lat = l.coords.latitude;
-          lng = l.coords.longitude;
-        }
-      } catch {}
-      try {
-        await api("/incidents", {
-          method: "POST",
-          body: {
-            type: "sos",
-            severity: "critical",
-            description: `Emergency SOS triggered by guard${lat && lng ? ` at ${lat.toFixed(4)}, ${lng.toFixed(4)}` : ""}.`,
-            site_id: today?.site_id,
-          },
-        });
-      } catch {}
-      Linking.openURL(`tel:${dispatchNumber}`);
-    } finally {
-      setSosSubmitting(false);
-      setSosOpen(false);
-    }
-  };
+  const dispatchNumber = data?.emergency_contacts?.find((contact: any) => contact.name === "HQ Dispatch")?.phone;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -238,14 +203,15 @@ export default function Dashboard() {
               testID="sos-btn"
               label="Emergency"
               sub="Request help"
-              onPress={() => { tap(); setSosOpen(true); }}
+              onPress={() => { tap(); router.push("/sos"); }}
               icon={<Ionicons name="shield-outline" size={22} color={light.text} />}
             />
             <QuickAction
               testID="call-dispatch-btn"
               label="Dispatch"
-              sub="Call dispatch"
-              onPress={() => { tap(); Linking.openURL(`tel:${dispatchNumber}`); }}
+              sub={dispatchNumber ? "Call dispatch" : "Not configured"}
+              disabled={!dispatchNumber}
+              onPress={() => { tap(); if (dispatchNumber) Linking.openURL(`tel:${dispatchNumber}`); }}
               icon={<Ionicons name="radio-outline" size={22} color={light.text} />}
             />
             <QuickAction
@@ -334,35 +300,18 @@ export default function Dashboard() {
         </Animated.View>
       </ScrollView>
 
-      {/* SOS Modal */}
-      <Modal visible={sosOpen} transparent animationType="fade" onRequestClose={() => setSosOpen(false)}>
-        <View style={styles.modalScrim}>
-          <View style={styles.modalCard} testID="sos-modal">
-            <Ionicons name="alert-circle" size={44} color={light.accentRed} style={{ alignSelf: "center" }} />
-            <Text style={styles.sosModalTitle}>Emergency SOS</Text>
-            <Text style={styles.sosModalBody}>
-              This will alert dispatch, share your location, and place a call to the emergency line.
-            </Text>
-            <View style={{ height: 22 }} />
-            <Pressable testID="sos-confirm-btn" onPress={triggerSos} disabled={sosSubmitting} style={styles.sosConfirm}>
-              {sosSubmitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.sosConfirmText}>Send Emergency Alert</Text>}
-            </Pressable>
-            <Pressable testID="sos-cancel-btn" onPress={() => setSosOpen(false)} style={styles.sosCancel}>
-              <Text style={styles.sosCancelText}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
 
-function QuickAction({ icon, label, sub, onPress, testID }: any) {
+function QuickAction({ icon, label, sub, onPress, testID, disabled = false }: any) {
   return (
     <Pressable
       testID={testID}
       onPress={onPress}
-      style={styles.actionCard}
+      disabled={disabled}
+      accessibilityState={{ disabled }}
+      style={[styles.actionCard, disabled && styles.actionCardDisabled]}
     >
       <View style={styles.actionIconCircle}>{icon}</View>
       <Text style={styles.actionLabel}>{label}</Text>
@@ -448,6 +397,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  actionCardDisabled: { opacity: 0.45 },
   actionIconCircle: {
     width: 46,
     height: 46,
@@ -495,12 +445,4 @@ const styles = StyleSheet.create({
   credNumber: { color: light.textSecondary, fontSize: 12, marginTop: 2 },
   credExpiry: { color: light.accentRed, fontSize: 12, fontWeight: "600" },
 
-  modalScrim: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", paddingHorizontal: 32 },
-  modalCard: { backgroundColor: "#fff", borderRadius: 20, padding: 24, borderWidth: 1, borderColor: light.cardBorder },
-  sosModalTitle: { color: light.text, fontSize: 22, fontWeight: "700", textAlign: "center", marginTop: 10 },
-  sosModalBody: { color: light.textSecondary, fontSize: 14, marginTop: 10, textAlign: "center", lineHeight: 20 },
-  sosConfirm: { backgroundColor: light.accentRed, borderRadius: 12, paddingVertical: 14, alignItems: "center" },
-  sosConfirmText: { color: "#fff", fontSize: 16, fontWeight: "600" },
-  sosCancel: { paddingVertical: 14, alignItems: "center", marginTop: 4 },
-  sosCancelText: { color: light.text, fontSize: 16, fontWeight: "500" },
 });

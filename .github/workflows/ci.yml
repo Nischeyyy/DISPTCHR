@@ -116,6 +116,7 @@ jobs:
       TWILIO_ACCOUNT_SID: ci-twilio-sid
       TWILIO_AUTH_TOKEN: ci-twilio-token
       TWILIO_FROM_NUMBER: "+14165550123"
+      DISPATCH_PHONE: "+14165550124"
     steps:
       - uses: actions/checkout@v7
       - run: docker compose config --quiet

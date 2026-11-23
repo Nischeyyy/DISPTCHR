@@ -1,11 +1,12 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Linking, Modal, TextInput } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Linking, Modal, TextInput, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { Button } from "@/src/ui";
 import { api } from "@/src/api/client";
 import { formatShiftTime, formatDate, hoursBetween, formatCurrency } from "@/src/utils/format";
+import { errorMessage, LoadError } from "@/src/components/LoadError";
 
 const C = {
   bg: "#F2F2F7",
@@ -34,10 +35,19 @@ export default function ShiftDetail() {
   const [swapReason, setSwapReason] = useState("");
   const [swapError, setSwapError] = useState("");
   const [submittingSwap, setSubmittingSwap] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
-    try { const d: any = await api(`/shifts/${id}`); setS(d); } catch {}
-    setLoading(false);
+    setLoading(true);
+    setLoadError("");
+    try {
+      const d: any = await api(`/shifts/${id}`);
+      setS(d);
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load this shift."));
+    } finally {
+      setLoading(false);
+    }
   }, [id]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -46,8 +56,11 @@ export default function ShiftDetail() {
     try {
       await api(`/shifts/${id}/acknowledge-instructions`, { method: "POST" });
       setS((prev: any) => ({ ...prev, instructions_acknowledged: true }));
-    } catch {}
-    setAcking(false);
+    } catch (error) {
+      Alert.alert("Acknowledgement failed", errorMessage(error, "Unable to acknowledge these instructions."));
+    } finally {
+      setAcking(false);
+    }
   };
 
   const submitSwapRequest = async () => {
@@ -68,7 +81,8 @@ export default function ShiftDetail() {
     }
   };
 
-  if (loading || !s) return <SafeAreaView style={styles.safe}><ActivityIndicator color={C.textSecondary} style={{ marginTop: 40 }} /></SafeAreaView>;
+  if (loading) return <SafeAreaView style={styles.safe}><ActivityIndicator color={C.textSecondary} style={{ marginTop: 40 }} /></SafeAreaView>;
+  if (loadError || !s) return <SafeAreaView style={styles.safe}><LoadError message={loadError || "This shift is unavailable."} onRetry={load} /></SafeAreaView>;
 
   const scheduledHrs = hoursBetween(s.start, s.end);
   const actualHrs = s.hours_worked ?? null;

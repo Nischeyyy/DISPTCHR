@@ -77,6 +77,7 @@ values.setdefault("SENDGRID_FROM_EMAIL", "")
 values.setdefault("TWILIO_ACCOUNT_SID", "")
 values.setdefault("TWILIO_AUTH_TOKEN", "")
 values.setdefault("TWILIO_FROM_NUMBER", "")
+values.setdefault("DISPATCH_PHONE", "")
 values.setdefault("EXPO_ACCESS_TOKEN", "")
 
 ordered_keys = [
@@ -98,6 +99,7 @@ ordered_keys = [
     "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "TWILIO_FROM_NUMBER",
+    "DISPATCH_PHONE",
     "EXPO_ACCESS_TOKEN",
 ]
 

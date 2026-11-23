@@ -22,11 +22,11 @@ const COLORS = {
   cancelled:    'text-gray-400',
 };
 
-export default function Badge({ status }) {
+export default function Badge({ status, className = '' }) {
   const label = status?.replace(/_/g, ' ') || 'unknown';
   const cls = COLORS[status] || 'text-gray-500';
   return (
-    <span className={`badge ${cls}`}>
+    <span className={`badge ${cls} ${className}`}>
       {label}
     </span>
   );

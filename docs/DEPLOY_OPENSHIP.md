@@ -47,6 +47,7 @@ The API deliberately refuses to start when a required control is missing.
 - `STORAGE_BACKEND=s3`, `S3_BUCKET`, region/endpoint as applicable, and workload identity or S3 credentials
 - SendGrid key and verified sender
 - Twilio account, token, and sender number
+- required `DISPATCH_PHONE` using the real company dispatch line in E.164 format
 - optional `SENTRY_DSN` and `EXPO_ACCESS_TOKEN`
 
 Use the deployment platform's secret store. Never place real values in Git, build arguments, screenshots, or support messages. Rotate any credential that has ever been pasted into a chat or terminal transcript before production use.

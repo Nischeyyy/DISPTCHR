@@ -17,6 +17,7 @@ export default function SOSScreen() {
   const [phase, setPhase] = useState<Phase>("standby");
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [locationShared, setLocationShared] = useState<boolean | null>(null);
   const [pulseAnim] = useState(() => new Animated.Value(1));
 
   useEffect(() => {
@@ -37,8 +38,10 @@ export default function SOSScreen() {
         const l = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         return { latitude: l.coords.latitude, longitude: l.coords.longitude };
       }
-    } catch {}
-    return { latitude: 0, longitude: 0 };
+    } catch {
+      // The emergency alert must still be sent when the device cannot resolve GPS.
+    }
+    return null;
   };
 
   const pressSOS = () => {
@@ -50,6 +53,7 @@ export default function SOSScreen() {
     setPhase("standby");
     setMessage("");
     setError(null);
+    setLocationShared(null);
   };
 
   const sendSOS = async () => {
@@ -60,11 +64,12 @@ export default function SOSScreen() {
       await api("/sos", {
         method: "POST",
         body: {
-          latitude: coords.latitude,
-          longitude: coords.longitude,
+          latitude: coords?.latitude ?? null,
+          longitude: coords?.longitude ?? null,
           message: message.trim() || undefined,
         },
       });
+      setLocationShared(Boolean(coords));
       if (Platform.OS !== "web") Vibration.vibrate([0, 100, 100, 100]);
       setPhase("sent");
     } catch (e: any) {
@@ -80,7 +85,9 @@ export default function SOSScreen() {
           <Ionicons name="checkmark-circle" size={80} color={theme.colors.verified} />
           <Text style={styles.sentTitle}>SOS Sent</Text>
           <Text style={styles.sentSub}>
-            Your supervisor has been notified with your GPS coordinates. Stay on the line and move to a safe area.
+            {locationShared
+              ? "Authorized supervisors were notified with your GPS coordinates. Stay in a safe area and await contact."
+              : "Authorized supervisors were notified, but this device could not provide GPS coordinates. Call emergency services if you are in immediate danger."}
           </Text>
           <Pressable style={styles.doneBtn} onPress={() => router.back()} accessibilityLabel="Back to App" accessibilityRole="button">
             <Text style={styles.doneBtnText}>Back to App</Text>
@@ -103,7 +110,7 @@ export default function SOSScreen() {
         {phase === "standby" && (
           <>
             <Text style={styles.hint}>
-              Press and hold the button below to send an emergency alert to all supervisors — instantly, with your GPS location.
+              Press and hold the button below to send an emergency alert to authorized supervisors. The app will include GPS when available.
             </Text>
             <View style={styles.sosWrapper}>
               <Animated.View style={[styles.sosPulse, { transform: [{ scale: pulseAnim }] }]} />
@@ -120,7 +127,7 @@ export default function SOSScreen() {
               </Pressable>
             </View>
             <Text style={styles.footer}>
-              This immediately alerts supervisors and auto-files a critical incident report.
+              This immediately alerts authorized supervisors and auto-files a critical incident report. GPS is included when the device can provide it.
             </Text>
           </>
         )}
@@ -131,7 +138,7 @@ export default function SOSScreen() {
               <Ionicons name="warning" size={30} color={theme.colors.danger} />
               <Text style={styles.confirmTitle}>Send Emergency Alert?</Text>
               <Text style={styles.confirmSub}>
-                All supervisors will be notified instantly with your GPS coordinates and a critical incident will be filed.
+                Authorized supervisors will be notified immediately, a critical incident will be filed, and the app will attempt to include your GPS coordinates.
               </Text>
             </View>
 
