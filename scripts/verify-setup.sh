@@ -3,8 +3,6 @@
 
 set -e
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 echo "=== DISPTCHR workspace verification ==="
 
 # 1. Backend health check
@@ -51,7 +49,7 @@ echo "   ✓ Disptchr Panel, PostgreSQL/PGlite, and the workforce control connec
 
 echo ""
 echo "5. Notification worker..."
-if ! pgrep -f "$REPO_DIR/backend/job_worker.py" >/dev/null 2>&1; then
+if ! pgrep -f "[j]ob_worker.py" >/dev/null 2>&1; then
   echo "   ✗ Notification worker is not running — check work/dev-logs/notification-worker.log"
   exit 1
 fi

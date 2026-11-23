@@ -63,13 +63,41 @@ start_background_service() {
   echo "→ Starting $name (log: work/dev-logs/$name.log)"
 }
 
+wait_for_process() {
+  local name="$1"
+  local process_pattern="$2"
+  local attempts=10
+
+  while [ "$attempts" -gt 0 ]; do
+    if pgrep -f "$process_pattern" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts - 1))
+    sleep 1
+  done
+
+  echo "! $name did not stay running. Check work/dev-logs/$name.log."
+  return 1
+}
+
+stop_process_tree() {
+  local pid="$1"
+  local child
+
+  while read -r child; do
+    [ -n "$child" ] && stop_process_tree "$child"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+
+  kill "$pid" >/dev/null 2>&1 || true
+}
+
 cleanup() {
   trap - INT TERM EXIT
   if [ "${#PIDS[@]}" -gt 0 ]; then
     echo
     echo "Stopping combined development services..."
     for pid in "${PIDS[@]}"; do
-      kill "$pid" >/dev/null 2>&1 || true
+      stop_process_tree "$pid"
     done
     wait "${PIDS[@]}" 2>/dev/null || true
   fi
@@ -159,7 +187,8 @@ fi
 
 start_service "api" 8000 "$DISPTCHR_DIR/backend" "$DISPTCHR_DIR/.venv/bin/uvicorn" server:app --host 127.0.0.1 --port 8000 --reload
 wait_for_http "api" "http://127.0.0.1:8000/api/health" || exit 1
-start_background_service "notification-worker" "$DISPTCHR_DIR/backend/job_worker.py" "$DISPTCHR_DIR/backend" "$DISPTCHR_DIR/.venv/bin/python" "$DISPTCHR_DIR/backend/job_worker.py"
+start_background_service "notification-worker" "[j]ob_worker.py" "$DISPTCHR_DIR/backend" "$DISPTCHR_DIR/.venv/bin/python" "$DISPTCHR_DIR/backend/job_worker.py"
+wait_for_process "notification-worker" "[j]ob_worker.py" || exit 1
 
 start_service "employee-app" 8080 "$DISPTCHR_DIR/frontend" env CI=1 corepack yarn web --port 8080
 start_service "manager-portal" 8081 "$DISPTCHR_DIR/manager-portal" npm run dev
