@@ -2202,7 +2202,7 @@ async def require_control_panel(request: Request):
     return {
         "id": request.headers.get("x-disptchr-actor-id", "control-panel-service").strip()[:120],
         "name": unquote(
-            request.headers.get("x-disptchr-actor-name", "Disptchr Panel").strip()
+            request.headers.get("x-disptchr-actor-name", "Ds Panel").strip()
         )[:120],
     }
 
@@ -2227,6 +2227,23 @@ def manager_access_view(user: dict) -> dict:
     }
 
 
+def employee_access_view(user: dict) -> dict:
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "full_name": user.get("full_name", ""),
+        "phone": user.get("phone"),
+        "status": user.get("access_status", "active"),
+        "employee_number": user.get("employee_number"),
+        "licence_number": user.get("licence_number"),
+        "licence_expiry": user.get("licence_expiry"),
+        "employment_status": user.get("employment_status", "Employee"),
+        "onboarding_complete": bool(user.get("onboarding_complete")),
+        "created_at": user.get("created_at"),
+        "access_updated_at": user.get("access_updated_at"),
+    }
+
+
 class ControlManagerCreateIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=12, max_length=128)
@@ -2244,6 +2261,26 @@ class ControlManagerUpdateIn(BaseModel):
 
 
 class ControlManagerPasswordResetIn(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
+
+
+class ControlEmployeeCreateIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=128)
+    full_name: str = Field(min_length=2, max_length=120)
+    phone: Optional[str] = Field(default=None, max_length=40)
+    employee_number: Optional[str] = Field(default=None, max_length=40)
+    licence_number: Optional[str] = Field(default=None, max_length=80)
+    licence_expiry: Optional[str] = Field(default=None, max_length=10)
+    employment_status: str = Field(default="Employee", min_length=2, max_length=80)
+    status: Literal["active", "disabled"] = "active"
+
+
+class ControlEmployeeUpdateIn(BaseModel):
+    status: Literal["active", "disabled"]
+
+
+class ControlEmployeePasswordResetIn(BaseModel):
     new_password: str = Field(min_length=12, max_length=128)
 
 
@@ -2300,6 +2337,113 @@ async def control_create_manager(body: ControlManagerCreateIn, control_actor=Dep
         "occurred_at": iso(now_utc()),
     })
     return {**manager_access_view(manager), "mfa_setup": mfa_setup}
+
+
+@api.get("/control/employees")
+async def control_list_employees(_control_actor=Depends(require_control_panel)):
+    employees = await db.users.find(
+        {"role": "employee"}, SENSITIVE_USER_PROJECTION
+    ).sort("full_name", 1).to_list(2000)
+    return {"employees": [employee_access_view(employee) for employee in employees]}
+
+
+@api.post("/control/employees", status_code=201)
+async def control_create_employee(body: ControlEmployeeCreateIn, control_actor=Depends(require_control_panel)):
+    email = body.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Email already registered")
+    if body.licence_expiry:
+        try:
+            date.fromisoformat(body.licence_expiry)
+        except ValueError:
+            raise HTTPException(422, "Licence expiry must use YYYY-MM-DD")
+    employee = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "hashed_password": hash_password(body.password),
+        "full_name": body.full_name.strip(),
+        "phone": body.phone,
+        "role": "employee",
+        "access_status": body.status,
+        "employee_number": body.employee_number or f"SH-E-{str(uuid.uuid4())[:6].upper()}",
+        "licence_number": body.licence_number,
+        "licence_expiry": body.licence_expiry,
+        "certifications": [],
+        "employment_status": body.employment_status.strip(),
+        "photo_url": None,
+        "emergency_contact": None,
+        "onboarding_complete": False,
+        "created_at": iso(now_utc()),
+        "access_updated_at": iso(now_utc()),
+    }
+    try:
+        await db.users.insert_one(employee)
+    except DuplicateKeyError:
+        raise HTTPException(409, "Email already registered")
+    await db.access_audit.insert_one({
+        "id": str(uuid.uuid4()), "action": "employee.created", "employee_id": employee["id"],
+        "employee_email": email, "before": None, "after": employee_access_view(employee),
+        "actor": control_actor, "source": "ds-panel", "occurred_at": iso(now_utc()),
+    })
+    return employee_access_view(employee)
+
+
+@api.patch("/control/employees/{employee_id}")
+async def control_update_employee(
+    employee_id: str,
+    body: ControlEmployeeUpdateIn,
+    control_actor=Depends(require_control_panel),
+):
+    employee = await db.users.find_one({"id": employee_id, "role": "employee"})
+    if not employee:
+        raise HTTPException(404, "Employee account not found")
+    before = employee_access_view(employee)
+    changed_at = iso(now_utc())
+    result = await db.users.update_one(
+        {"id": employee_id, "role": "employee"},
+        {"$set": {"access_status": body.status, "access_updated_at": changed_at}},
+    )
+    if result.matched_count != 1:
+        raise HTTPException(404, "Employee account not found")
+    if body.status == "disabled":
+        await db.refresh_tokens.update_many(
+            {"user_id": employee_id, "revoked_at": None},
+            {"$set": {"revoked_at": changed_at, "revoke_reason": "account_disabled"}},
+        )
+    updated = await db.users.find_one({"id": employee_id}, SENSITIVE_USER_PROJECTION)
+    await db.access_audit.insert_one({
+        "id": str(uuid.uuid4()), "action": "employee.access_updated", "employee_id": employee_id,
+        "employee_email": employee["email"], "before": before, "after": employee_access_view(updated),
+        "actor": control_actor, "source": "ds-panel", "occurred_at": changed_at,
+    })
+    return employee_access_view(updated)
+
+
+@api.post("/control/employees/{employee_id}/reset-password")
+async def control_reset_employee_password(
+    employee_id: str,
+    body: ControlEmployeePasswordResetIn,
+    control_actor=Depends(require_control_panel),
+):
+    employee = await db.users.find_one({"id": employee_id, "role": "employee"})
+    if not employee:
+        raise HTTPException(404, "Employee account not found")
+    changed_at = iso(now_utc())
+    await db.users.update_one(
+        {"id": employee_id, "role": "employee"},
+        {"$set": {"hashed_password": hash_password(body.new_password), "access_updated_at": changed_at}},
+    )
+    await db.refresh_tokens.update_many(
+        {"user_id": employee_id, "revoked_at": None},
+        {"$set": {"revoked_at": changed_at, "revoke_reason": "password_reset"}},
+    )
+    await db.password_resets.delete_many({"user_id": employee_id})
+    await db.access_audit.insert_one({
+        "id": str(uuid.uuid4()), "action": "employee.password_reset", "employee_id": employee_id,
+        "employee_email": employee["email"], "actor": control_actor,
+        "source": "ds-panel", "occurred_at": changed_at,
+    })
+    return {"status": "password_reset"}
 
 
 @api.post("/control/managers/{manager_id}/reset-mfa")

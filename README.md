@@ -4,7 +4,7 @@ This repository contains the existing Skyhawk workforce applications and their s
 
 ## Product hierarchy
 
-1. **Disptchr Panel** (sibling repository) — directors and board members control company records and manager access.
+1. **Ds Panel** (sibling `disptchr-panel` repository) — directors and board members control company records plus manager and employee account access.
 2. **Manager Portal** (`manager-portal/`) — managers operate the guard workforce within permissions assigned by directors.
 3. **Guard application** (`frontend/`) — guards use the native Expo application for shifts, timeclock, incidents, payroll, credentials, announcements, and related operations.
 
@@ -15,7 +15,7 @@ The FastAPI service in `backend/` is the enforcement boundary. Manager account s
 From the parent workspace, run `npm run dev`. This starts the existing repositories together:
 
 - combined workforce API and Manager Portal: `http://127.0.0.1:5050`
-- directors' Disptchr Panel: `http://127.0.0.1:3000`
+- directors' Ds Panel: `http://127.0.0.1:3000`
 
 The guard product is a native iOS/Android application, not a production web application. Use Expo Go or a development build from `frontend/`.
 
@@ -26,6 +26,7 @@ The backend requires Python 3.11 or newer; production and CI use Python 3.12. Lo
 - guards use short-lived access tokens and rotating, revocable refresh tokens stored in native secure storage;
 - managers use secure, HttpOnly server sessions and mandatory TOTP MFA;
 - director actions arrive through a separate server-to-server control key and are enforced by this API;
+- Ds Panel employee creation, enable/disable, and password reset operations write real Guard App users to MongoDB, revoke affected sessions, and append access-audit records;
 - SIN and direct-deposit data are encrypted at rest and only masked values are returned to ordinary clients;
 - uploaded evidence and pay stubs use private object storage in production and short-lived scoped download tokens;
 - rate limits use shared Redis in production;

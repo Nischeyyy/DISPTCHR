@@ -137,8 +137,9 @@ def bootstrap_disposable_environment(session):
         },
     ), 201)
 
-    expect(session.post(
-        f"{BASE_URL}/api/admin/guards",
+    second_guard = expect(session.post(
+        f"{BASE_URL}/api/control/employees",
+        headers=control_headers,
         json={
             "email": SECOND_GUARD_EMAIL,
             "password": SECOND_GUARD_PASSWORD,
@@ -147,9 +148,25 @@ def bootstrap_disposable_environment(session):
             "employee_number": "E2E-GUARD-002",
             "licence_number": "E2E-LIC-002",
             "licence_expiry": expiry,
-            "certifications": ["First Aid"],
+            "employment_status": "Security Guard",
+            "status": "active",
         },
     ), 201)
+    assert any(item["id"] == second_guard["id"] for item in expect(
+        session.get(f"{BASE_URL}/api/control/employees", headers=control_headers), 200
+    )["employees"])
+    expect(session.patch(
+        f"{BASE_URL}/api/control/employees/{second_guard['id']}",
+        headers=control_headers, json={"status": "disabled"},
+    ), 200)
+    expect(session.patch(
+        f"{BASE_URL}/api/control/employees/{second_guard['id']}",
+        headers=control_headers, json={"status": "active"},
+    ), 200)
+    expect(session.post(
+        f"{BASE_URL}/api/control/employees/{second_guard['id']}/reset-password",
+        headers=control_headers, json={"new_password": SECOND_GUARD_PASSWORD},
+    ), 200)
     site = expect(session.post(
         f"{BASE_URL}/api/admin/sites",
         json={
