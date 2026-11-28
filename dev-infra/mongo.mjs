@@ -1,7 +1,13 @@
 import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-const dataDirectory = resolve(".local/mongodb");
+// WiredTiger database files cannot safely live in iCloud/Dropbox/OneDrive folders:
+// sync conflict copies corrupt the engine metadata. Keep local development data
+// outside the repository by default and allow an explicit non-synced override.
+const dataDirectory = resolve(
+  process.env.DISPTCHR_LOCAL_MONGO_DIR || `${tmpdir()}/disptchr-local-mongodb`,
+);
 const binaryDirectory = resolve(".local/mongodb-binaries");
 await mkdir(dataDirectory, { recursive: true });
 await mkdir(binaryDirectory, { recursive: true });
@@ -20,7 +26,7 @@ const server = await MongoMemoryServer.create({
   },
 });
 
-console.log("Local DISPTCHR MongoDB is ready on port 27017.");
+console.log(`Local DISPTCHR MongoDB is ready on port 27017 (${dataDirectory}).`);
 
 let stopping = false;
 async function stop() {

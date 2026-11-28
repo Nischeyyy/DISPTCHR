@@ -1,6 +1,6 @@
 # Production readiness report
 
-**Assessment date:** 2026-11-23
+**Assessment date:** 2026-11-28
 **Scope:** `Nischeyyy/DISPTCHR` workforce API, Manager Portal, guard application, and the integrated `Nischeyyy/disptchr-panel` directors' website.
 
 ## Release decision
@@ -17,8 +17,8 @@ No fake business records, demo accounts, default passwords, or development authe
 | Backend security scan | Green | Bandit reports no findings; the production Python dependency audit reports 0 known vulnerabilities |
 | Backend automated tests | Green | 49 core tests passed; 25 API E2E workflows passed against a fresh disposable MongoDB database created by CI |
 | Manager Portal | Green | 12 tests passed; production build passed; dependency audit reports 0 vulnerabilities |
-| Disptchr Panel database | Green | schema v8 migration and connectivity check passed against persistent local PostgreSQL/PGlite |
-| Disptchr Panel | Green | TypeScript passed; 5 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities |
+| Disptchr Panel database | Green | schema v17 migration and connectivity check passed against managed PostgreSQL with TLS required by the client; the application has no local data fallback |
+| Disptchr Panel | Green | TypeScript passed; 10 full-stack/unit tests passed; production build passed; dependency audit reports 0 vulnerabilities; live browser verification passed for invoice, timesheet, audit, and reconciliation grids |
 | Guard application | Green | lint and TypeScript passed; Expo Doctor 20/20; dependency audit reports 0 vulnerabilities |
 | Native bundles | Green | production-style Expo exports completed for iOS and Android |
 | Integrated local runtime | Green | API, gateway, Manager Portal, Disptchr Panel, control connection, MongoDB, and notification worker health verified |
@@ -59,7 +59,9 @@ No fake business records, demo accounts, default passwords, or development authe
 - Documents support folders, uploads, versions, private downloads, folder moves, and a recoverable audited archive. Official generated/imported records are protected from archival, and archived uploads can be reviewed and restored without destroying their file data.
 - Audit cases enforce forward-only review/resolution/closure, cannot close with open findings, and lock findings after resolution so concluded evidence cannot be rewritten.
 - Record imports are content-fingerprinted per destination to prevent accidental duplicate ingestion, preserve their source artifact, report invalid rows, and leave summary-only invoice imports in an editable draft state until line integrity is established.
-- Spreadsheet Studio, saved workbooks, `.xlsx` exports, report builder, complete PDF reports, audit cases, findings, evidence, activity export, letterhead generation, licensing records, and record import are database-backed and audited.
+- Spreadsheet Studio provides a file-explorer workspace with organization sharing, recoverable deletion, FortuneSheet editing, PostgreSQL persistence, version history, and ExcelJS `.xlsx` import/export.
+- TanStack records grids provide consistent sorting, search, pagination and column controls for invoice registers, the Master Timesheet, audit cases/findings, and reconciliation runs/findings while server-side filtering and paging remain authoritative for large datasets.
+- Report builder, complete PDF reports, audit cases, findings, evidence, activity export, letterhead generation, licensing records, and record import are database-backed and audited.
 - Employment Package creates and stores six separate PDFs: employment summary/acceptance, employee information, direct-deposit authorization, emergency contact, policy/confidentiality, and licence/work eligibility.
 
 ## External release blockers

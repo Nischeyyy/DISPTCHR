@@ -45,7 +45,7 @@ if ! echo "$PANEL_HEALTH" | grep -q '"status":"ok"'; then
   echo "   ✗ Disptchr Panel is not healthy — check work/dev-logs/control-panel.log"
   exit 1
 fi
-echo "   ✓ Disptchr Panel, PostgreSQL/PGlite, and the workforce control connection are healthy"
+echo "   ✓ Disptchr Panel, managed PostgreSQL, and the workforce control connection are healthy"
 
 echo ""
 echo "5. Notification worker..."

@@ -21,6 +21,8 @@ The guard product is a native iOS/Android application, not a production web appl
 
 The backend requires Python 3.11 or newer; production and CI use Python 3.12. Local secrets are generated into ignored files by `python3 scripts/setup-dev-env.py`. Public registration is disabled by default; the runtime contains no demo-data seeder.
 
+When local MongoDB is selected, its WiredTiger data defaults to a stable folder under the operating system's temporary-data directory instead of the repository. Cloud-synced folders such as Documents, iCloud, Dropbox, and OneDrive can create conflict copies that corrupt database engine metadata. Set `DISPTCHR_LOCAL_MONGO_DIR` to an explicit non-synced path when a different persistent development location is required.
+
 ## Security model
 
 - guards use short-lived access tokens and rotating, revocable refresh tokens stored in native secure storage;
